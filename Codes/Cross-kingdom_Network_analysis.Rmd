@@ -1,0 +1,687 @@
+---
+title: "network_analysis"
+author: "Shihan Zhang"
+date: '2022-09-12'
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+	echo = TRUE,
+	message = FALSE,
+	warning = FALSE
+)
+```
+
+
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+renv::init()
+```
+
+# Load library
+```{r}
+library(phyloseq)
+library(phylosmith)
+library(SummarizedExperiment)
+library(tidyverse)
+library(metagenomeSeq)
+library(ggplot2)
+library(ggpubr)
+library(compositions)
+library(gridExtra)
+library(qpdf)
+library(devtools)
+library(SpiecEasi) # install_github("zdk123/SpiecEasi")
+library(doParallel)
+library(igraph)
+library(scales)
+library(microbiome)
+library(stringr)
+```
+
+# Parallelization
+```{r}
+cores <- detectCores()
+nc <- cores[1]
+if (nc > 3) {
+  nc <- nc-4  # leave 2 cores free if > 3 cores available
+}
+cl <- makeCluster(nc)
+registerDoParallel(cl)
+paste(nc, 'cores used')
+# Set seed for pseudo-random numbers generation
+set.seed(2)
+```
+
+# Load Phyloseq obj
+```{r}
+fungi <- readRDS('/Users/senmnes/DESKTOP_HD/Bernet_6th/Multi_Omics/filtered_phyloseq/fungi.rds')
+bact <- readRDS('/Users/senmnes/DESKTOP_HD/Bernet_6th/Multi_Omics/filtered_phyloseq/bact.rds')
+
+fungi <- prune_samples(is.na(sample_data(fungi)$Group) == F, fungi)
+bact <- prune_samples(is.na(sample_data(bact)$Group) == F, bact)
+
+fungi_longi <- readRDS('/Users/senmnes/DESKTOP_HD/Bernet_6th/Multi_Omics/filtered_phyloseq/aim3.fungi.rds')
+bact_longi <- readRDS('/Users/senmnes/DESKTOP_HD/Bernet_6th/Multi_Omics/filtered_phyloseq/aim3.bact.rds')
+
+fungi_Acute.1Y <- readRDS('/Users/senmnes/DESKTOP_HD/Bernet_6th/Multi_Omics/filtered_phyloseq/aim4.fungi.rds')
+bact_Acute.1Y <- readRDS('/Users/senmnes/DESKTOP_HD/Bernet_6th/Multi_Omics/filtered_phyloseq/aim4.bact.rds')
+```
+
+# Top prevalance filtering pipeline
+### data frame transformation funciton
+```{r}
+df_trans <- function(df,view){
+  # assign rowanme to a feature column
+  df$feature <- row.names(df)
+  
+  # convert df into long format
+  long_otu_norm <- df %>% 
+    pivot_longer(
+      !feature,
+      names_to='sample',
+      values_to='value')
+  
+  # add view
+  long_otu_norm$view <- view
+  # return df
+  return(long_otu_norm)
+}
+```
+## top.prevalence ranking function
+```{r}
+top.prevalence <- function(plsq,number){
+  result <- prevalence(plsq,detection = 0,sort = T,count = F,include.lowest = FALSE)
+  result <- result[1:number]
+  # construct df
+  prevalence.ranking <- data.frame('feature'=names(result),'prevalence' = rep(0,number))
+  # append value
+  for(i in seq_along(result)){
+    prevalence.ranking[(prevalence.ranking$feature == names(result[i])),]$prevalence <- result[[i]]
+  }
+  return(prevalence.ranking)
+}
+```
+
+## Main filtering function
+```{r}
+Top_prevalence_pipeline <- function(bact_plsq,fungi_plsq,minimum_read,num_top_taxa){
+  # remove sample barcode tag
+  sample_names(bact_plsq) <- gsub('16S.','',sample_names(bact_plsq))
+  sample_names(fungi_plsq) <-gsub('ITS.','',sample_names(fungi_plsq))
+  
+  # 
+  bact_logCSS <- bact_plsq
+  fungi_logCSS <- fungi_plsq
+  
+  ## Filtering Phyloseq based on top prevalence ranking
+  prev.cal.bact<-top.prevalence(bact_logCSS,num_top_taxa)
+  prev.cal.fungi<-top.prevalence(fungi_logCSS,num_top_taxa)
+  
+  # plot top ranks
+  bact.100<-ggplot(prev.cal.bact, aes(prevalence,reorder(feature, prevalence))) + 
+    geom_bar(stat="identity") +
+    labs(x='Prevalance', y='Features',subtitle = 'Bacteria')+
+    theme(axis.text.y=element_text(size=3))
+  
+  fungi.100<-ggplot(prev.cal.fungi, aes(prevalence,reorder(feature, prevalence))) + 
+    geom_bar(stat="identity") +
+    labs(x='Prevalance', y='Features',subtitle = 'Fungi')+
+    theme(axis.text.y=element_text(size=3))
+  
+  # filter the phyloseq
+  bact.tp_rank <- prune_taxa((taxa_names(bact_logCSS) %in% prev.cal.bact$feature), bact_logCSS)
+  fungi.tp_rank <- prune_taxa((taxa_names(fungi_logCSS) %in% prev.cal.fungi$feature), fungi_logCSS)
+  
+  # mimum reads sample filtering
+  bact.tp_rank <- prune_samples(colSums(otu_table(bact.tp_rank)) > minimum_read, bact.tp_rank)
+  fungi.tp_rank <- prune_samples(colSums(otu_table(fungi.tp_rank)) > minimum_read, fungi.tp_rank)
+  
+  ### Making long df again
+  # extract otu_table 
+  bact_logCSS.otu <- as.data.frame(otu_table(bact.tp_rank))
+  fungi_logCSS.otu <- as.data.frame(otu_table(fungi.tp_rank))
+  
+  # making long df
+  long_bact_logCSS <- df_trans(bact_logCSS.otu,'Bacteria')
+  long_fungi_logCSS <- df_trans(fungi_logCSS.otu,'Fungi')
+  
+  # merge 2 df
+  logCSS_merge <- long_bact_logCSS %>% full_join(long_fungi_logCSS)
+  # reorder df
+  logCSS_merge <- logCSS_merge[c('sample','feature','value','view')]
+
+  # plot distribution
+  density.dist<-ggplot(logCSS_merge,aes(x=value))+ geom_density() +
+        facet_wrap(vars(view)) + 
+        labs(subtitle =paste('Normalization: LogCSS',
+                             '\n','ntaxa_bact:',ntaxa(bact.tp_rank),
+                             '\n','ntaxa_fungi:',ntaxa(fungi.tp_rank),
+                             '\n','minreadsTreshold:',minimum_read))
+  
+  # build return list
+  objs <- c()
+  objs[[length(objs)+1]] <- bact.tp_rank
+  objs[[length(objs)+1]] <- fungi.tp_rank
+  objs[[length(objs)+1]] <- density.dist
+  objs[[length(objs)+1]] <- ggarrange(bact.100,fungi.100,align='h')
+
+  print('Filter has been completed')
+  return(objs)
+}
+```
+
+## Filter the Phyloseq
+In this task, we use only the 1YEAR group.
+```{r}
+# Get 1YEAR
+bact.1Y <- prune_samples(sample_data(bact)$SampleCollection == 'BCNasalswab1YEAR',bact)
+fungi.1Y <- prune_samples(sample_data(fungi)$SampleCollection == 'BCNasalswab1YEAR',fungi)
+```
+
+# SpiecEasi Pipeline
+## Initialize component function
+```{r}
+# significant taxa from aim1
+aim1_bact_bugs_healthy <-c('g.Streptococcus_190','g.Leptotrichia_334','s.Gemella_haemolysans_45','f.Neisseriaceae_59')
+aim1_bact_bugs_wheeze<-c('s.Moraxella_catarrhalis_12')
+aim1_fungi_bugs <-c('o.o__Capnodiales_142')
+
+#### Graphic style function
+# Function to create graph with style attributes
+graph_style <- function(SE_model, phylo, factor){
+  
+    # General graph style
+    graph <- adj2igraph(getRefit(SE_model))
+    V(graph)$degree <- rescale(degree(graph), to=c(0.6,0.9))
+    shift <- 0.02
+    
+    # Vertex names
+    for (i in 1:length(V(graph))){
+      if (tax_table(phylo)[i,1]=='Host'){
+            V(graph)$name[i] <- tax_table(phylo)[i,8]
+            V(graph)$namecomplete[i] <- tax_table(phylo)[i,8]}
+      else if (tax_table(phylo)[i,1]=='Bacteria'){
+        # Abbreviation 
+            V(graph)$name[i] <- str_sub(tax_table(phylo)[i,8],3,5)
+        # full name
+            V(graph)$namecomplete[i] <- tax_table(phylo)[i,8]}
+      else if (tax_table(phylo)[i,1]=='k__Fungi'){
+            V(graph)$name[i] <- str_sub(tax_table(phylo)[i,8],6,8)
+            V(graph)$namecomplete[i] <- tax_table(phylo)[i,8]}
+      #V(graph)$name[i] <- tax_table(phylo)[i,8]
+      }
+
+    # Vertex attributes
+    tab <- table(tax_table(phylo)[,1])
+    # Vertex size
+    if (dim(tab)==2){
+      l1 <- which(tax_table(phylo)[,1]=='Bacteria') # Make sure it follows the order of the phyloseq object
+      l2 <- which(tax_table(phylo)[,1]=='k__Fungi')
+      df1 <- sqrt(rowMeans(microbiome::transform(otu_table(phylo)[l1[1]:length(l1),], 'compositional'))+shift)*factor
+      df2 <- sqrt(rowMeans(microbiome::transform(otu_table(phylo)[l2[1]:(l2[1]+(length(l2)-1)),], 'compositional'))+shift)*factor
+      V(graph)$size <- c(df1,df2)
+      V(graph)$labelsize <- V(graph)$size}
+    else if (dim(tab)==3){
+      l1 <- which(tax_table(phylo)[,1]=='Bacteria') # Make sure it follows the order of the phyloseq object
+      l2 <- which(tax_table(phylo)[,1]=='k__Fungi')
+      l3 <- which(tax_table(phylo)[,1]=='Host')
+      df1 <- sqrt(rowMeans(microbiome::transform(otu_table(phylo)[l1[1]:length(l1),], 'compositional'))+shift)*factor
+      df2 <- sqrt(rowMeans(microbiome::transform(otu_table(phylo)[l2[1]:(l2[1]+(length(l2)-1)),], 'compositional'))+shift)*factor
+      df3 <- sqrt(rowMeans(microbiome::transform(otu_table(phylo)[l3[1]:(l3[1]+(length(l3)-1)),], 'compositional'))+shift)*factor
+      V(graph)$size <- c(df1,df2,df3)
+      V(graph)$labelsize <- V(graph)$size}
+    else {
+      V(graph)$size <- sqrt(rowMeans(microbiome::transform(otu_table(phylo)[1:dim(otu_table(phylo))[1],], 'compositional'))+shift)*factor
+      V(graph)$labelsize <- V(graph)$size}
+    
+    # Vertex color and shape
+    for (i in 1:length(V(graph))){
+      if (tax_table(phylo)[i,1]=='Bacteria'){
+        # aim1 bugs color 
+            if(rownames(tax_table(phylo)[i,1]) %in% aim1_bact_bugs_healthy){
+              V(graph)$color[i] <- adjustcolor('plum4', alpha.f = V(graph)$degree[i])
+              V(graph)$border[i] <- 'plum4'
+            }else if (rownames(tax_table(phylo)[i,1]) %in% aim1_bact_bugs_wheeze){
+              V(graph)$color[i] <- adjustcolor('plum4', alpha.f = V(graph)$degree[i])
+              V(graph)$border[i] <- 'plum4'
+            }else{
+              V(graph)$color[i] <- adjustcolor('plum4', alpha.f = V(graph)$degree[i])
+              V(graph)$border[i] <- 'plum4'
+            }
+            V(graph)$shape[i] <- 'circle'}
+      else if (tax_table(phylo)[i,1]=='k__Fungi'){
+        # aim1 bugs 
+        if(rownames(tax_table(phylo)[i,1]) %in% aim1_fungi_bugs){
+            V(graph)$color[i] <- adjustcolor('chocolate3', alpha.f = V(graph)$degree[i])
+            V(graph)$border[i] <- 'chocolate3'
+          }else{
+            V(graph)$color[i] <- adjustcolor('chocolate3', alpha.f = V(graph)$degree[i])
+            V(graph)$border[i] <- 'chocolate3'
+          }
+            V(graph)$shape[i] <- 'circle'}
+      else {
+            V(graph)$color[i] <- adjustcolor('goldenrod3', alpha.f = V(graph)$degree[i])
+            V(graph)$border[i] <- 'goldenrod3'
+            V(graph)$shape[i] <- 'square'}}
+    
+    # Vertex identity (clusters)
+    letters <- c(LETTERS[1:26], tolower(LETTERS[1:26]))
+    cluster <- cluster_fast_greedy(graph)
+    cluster.keep <- as.numeric(names(sizes(cluster)[sizes(cluster) >= 3]))
+    vertex.keep <- which(cluster$membership %in% cluster.keep)
+    for (i in 1:length(V(graph))){
+      V(graph)$letter[i] <- letters[1:dim(communities(cluster))][cluster$membership][i]}
+    V(graph)[-which(cluster$membership %in% cluster.keep)]$letter <- NA
+    E(graph)$weights <- ifelse(crossing(cluster, graph), 4, 1)
+
+    return(graph)}
+
+# Function to save graph
+plot_graph <- function(object, output, layout, clust=FALSE){
+  if (clust==TRUE){
+    label <- V(object)$letter
+    V(object)$labelsize <- V(object)$labelsize*2}
+  else {
+    label <- V(object)$name}
+  pdf(file = paste0(output,'.pdf'), width = 10, height = 10, useDingbats = F, compress = F)
+  plot(object,
+       layout = layout,
+       vertex.color = V(object)$color,
+       vertex.size = V(object)$size,
+       #vertex.frame.color = V(object)$border,
+       vertex.frame.color = 'white',
+       vertex.label.cex = V(object)$labelsize/10,
+       vertex.label = label,
+       #vertex.label = substr(label, 3, 5),
+       edge.curved = 0.05,
+       edge.width = 2,
+       vertex.label.color = 'black',
+       vertex.label.family = 'Helvetica',
+       vertex.label.font = 1,
+       edge.color = 'grey60')
+  dev.off()
+}
+
+#### Cross domain interactions
+PP_cross_domain_interaction <- function(bact_plsq,fungi_plsq){
+  # Phyloseq object container
+  plsq_container <- c()
+  
+  # Rample number is unbalance, bact phyloseq has more samples. So filter the sample for bact phyloseq.
+  bact_plsq <- prune_samples(sample_names(bact_plsq) %in% sample_names(fungi_plsq),bact_plsq)
+  fungi_plsq <- prune_samples(sample_names(fungi_plsq) %in% sample_names(bact_plsq),fungi_plsq)
+  
+  # Remove tags and filter the barcode
+  sample_data(bact_plsq)$Barcode <-gsub('16S.','',sample_data(bact_plsq)$Barcode)
+  sample_data(fungi_plsq)$Barcode <-gsub('ITS.','',sample_data(fungi_plsq)$Barcode)
+  
+  # Now bact & fungi has same sample barcode. If we sort on barcode, the samples for both phyloseq can has same order
+  bact_plsq<-set_sample_order(bact_plsq,sort_on = 'Barcode')
+  fungi_plsq<-set_sample_order(fungi_plsq,sort_on = 'Barcode')
+
+  # Check order, 
+  if(identical(sample_names(bact_plsq), sample_names(fungi_plsq))){
+    print('Sample names are identical')
+    # append model to list 
+    plsq_container[[length(plsq_container)+1]] <- bact_plsq
+    plsq_container[[length(plsq_container)+1]] <- fungi_plsq
+    # 
+    print(paste('Phyloseq objects appended into: plsq_container'))
+  }else{print('Sample names are NOT identical!!!')}
+  
+  return(plsq_container)
+}
+
+#### Degree statistics function
+degree_distribution <- function(object){
+  dd <- degree.distribution(adj2igraph(getRefit(object)))
+  df <- as.data.frame(cbind(0:(length(dd)-1), dd))
+  colnames(df)[1:2] <- c('Degree', 'Frequency')
+  df$Frequency <- df$Frequency*100
+  return(df)}
+
+degree_distribution_df <- function(object){
+  dd <- degree(adj2igraph(getRefit(object)))
+  df <- summary(dd)
+  return(df)}
+
+#### Egde counter function
+edge_counter <- function(igh_obj){
+  taxa<-c()
+  edges<-c()
+  for(i in 1:length(igh_obj)){
+    for(taxa_list in igh_obj[[i]]){
+      taxa<-append(taxa,names(igh_obj[[i]]))
+      edges<-append(edges,length(taxa_list))
+    }
+  }
+  t <- data.frame('taxa'=taxa,'edges'=edges)
+  return(t)
+}
+#
+multik_edges_counter <- function(igh_obj,bact_phylo,fungi_phylo){
+  # placeholder df
+  t <- data.frame('taxa'=c(taxa_names(bact_phylo),taxa_names(fungi_phylo)),
+                  'edges' = rep(0,200),'B2B' = rep(0,200),'B2F' = rep(0,200),'F2B' = rep(0,200),'F2F' = rep(0,200))
+  # main loop
+  for(i in 1:length(igh_obj)){
+    # first layer taxa name
+    L1.name <- names(igh_obj[[i]])
+    # looping second layer
+      for(k in 1:length(igh_obj[[i]])){
+        # if second layer has taxa
+        if(length(igh_obj[[i]][[k]])!=0){
+          # looping third layer
+          # total egdes count
+            t[(t$taxa == L1.name),]$edges <- length(igh_obj[[i]][[k]])
+          for(j in 1:length(igh_obj[[i]][[k]])){
+            # get L2 name
+            L2.name <- names(igh_obj[[i]][[k]][j])
+            # count edges by relationship
+            if(L1.name %in% taxa_names(bact_phylo)){
+                # case count B2B
+              t[(t$taxa == L1.name),]$B2B <- sum(names(igh_obj[[i]][[k]]) %in% taxa_names(bact_phylo))
+                # case count B2F
+              t[(t$taxa == L1.name),]$B2F <- sum(!names(igh_obj[[i]][[k]]) %in% taxa_names(bact_phylo))
+            }else if(L1.name %in% taxa_names(fungi_phylo)){
+              # case F2B
+              t[(t$taxa == L1.name),]$F2B <- sum(names(igh_obj[[i]][[k]]) %in% taxa_names(bact_phylo))
+              # case F2F
+              t[(t$taxa == L1.name),]$F2F <- sum(!names(igh_obj[[i]][[k]]) %in% taxa_names(bact_phylo))
+            }else{}
+        }
+      }
+    }
+  }
+  return(t)
+}
+```
+
+## Run SpiecEasi & Init model 
+```{r}
+# Placeholder for Edges counts dataframe
+Edges_count <- c()
+# SpiecEasi model container; This container carries all the trained models for convenience accesses different   models.
+Spezy_models <- c()
+```
+
+```{r}
+# main function
+Spezy_pipeline <- function(bact_plsq,fungi_plsq,graph_name){
+  ### Build model - single phyloseq
+  # Bacteria
+  print(paste('Running first model'))
+  bact.spezy <- spiec.easi(bact_plsq, method='mb', lambda.min.ratio=1e-2,nlambda=20, pulsar.params=list(rep.num=50))
+  # append model to list
+  Spezy_models[[length(Spezy_models)+1]] <<- bact.spezy
+  print(paste('First model appended to: Spezy_models'))
+  
+  # Fungi
+  print(paste('Running second model'))
+  fungi.spezy <- spiec.easi(fungi_plsq, method='mb', lambda.min.ratio=1e-2,nlambda=20, pulsar.params=list(rep.num=50))
+  # append model to list
+  Spezy_models[[length(Spezy_models)+1]] <<- fungi.spezy
+  print(paste('Second model appended to: Spezy_models'))
+
+  ### Cross domain interactions
+  # run PP_cross_domain_interaction() to match the sample names & order of phyloseq object
+  pp_plsqs<-PP_cross_domain_interaction(bact_plsq,fungi_plsq)
+  # get filtered phyloeq for Multi-Kingdom interaction
+  cdi_bact <- pp_plsqs[[1]]
+  cdi_fungi <- pp_plsqs[[2]]
+  # 
+   # Build model - Multi-kingdom
+   print(paste('Running Cross domain interactions model'))
+   Multi.spezy <- spiec.easi(list(cdi_bact, cdi_fungi), method='mb', nlambda=40,lambda.min.ratio=1e-2, pulsar.params = list(thresh = 0.05))
+   # append model to list
+   Spezy_models[[length(Spezy_models)+1]] <<- Multi.spezy
+   print(paste('Cross domain interactions model appended to: Spezy_models'))
+  
+  # TESTING 
+  # bact.spezy <- Spezy_models[[1]]
+  # fungi.spezy <- Spezy_models[[2]]
+  # Multi.spezy <- Spezy_models[[3]]
+  
+  ### Build Graph
+  # Build graph with graph_style function
+  bact_graph <- graph_style(bact.spezy,bact_plsq,50)
+  fungi_graph <- graph_style(fungi.spezy,fungi_plsq,50)
+  # Merge Phyloseq Obj
+  Multi_plsq<- phyloseq(otu_table(rbind(otu_table(cdi_bact), otu_table(cdi_fungi)), taxa_are_rows = T), sample_data(cdi_bact), tax_table(rbind(tax_table(cdi_bact), tax_table(cdi_fungi))))
+  #
+  Multi.k_graph <- graph_style(Multi.spezy,Multi_plsq,35)
+  
+  # create network plots # saved to local 
+  plot_graph(bact_graph, paste0(graph_name,'_Bact._network_graph'), layout_with_fr(bact_graph, dim = 2))
+  plot_graph(fungi_graph, paste0(graph_name,'_Fungi._network_graph'), layout_with_fr(fungi_graph, dim = 2))
+  plot_graph(Multi.k_graph, paste0(graph_name,'_Multi.K._network_graph'), layout_with_fr(Multi.k_graph, dim = 2))
+  print('All network plots has been saved.')
+  
+  ### Degree distribution statistics
+  ds.bact <- degree_distribution(bact.spezy)
+  ds.fungi <- degree_distribution(fungi.spezy)
+  ds.Multi <- degree_distribution(Multi.spezy)
+  
+  # Plot Degree distribution
+  ggplot(ds.bact, aes(x=Degree, y=Frequency)) +
+    # bact
+    geom_line(col = adjustcolor('plum4', alpha.f = 0.4), linetype = 'solid', size=1) +
+    geom_point(fill = adjustcolor('plum4', alpha.f = 0.8), cex = 6, shape = 21, col='white') +
+    # fungi
+    geom_line(data = ds.fungi, col = adjustcolor('chocolate3', alpha.f = 0.4), linetype = 'solid', size=1) +
+    geom_point(data = ds.fungi, fill = adjustcolor('chocolate3', alpha.f = 0.8), cex = 6, shape = 21, col='white') +
+    # Multi K 
+    geom_line(data = ds.Multi, col = adjustcolor('lightsteelblue4', alpha.f = 0.4), linetype = 'solid', size=1) +
+    geom_point(data = ds.Multi, fill = adjustcolor('lightsteelblue4', alpha.f = 0.8), cex = 6, shape = 21, col='white') +
+    labs(title = 'Nasal microbiome networks degree',subtitle = graph_name) + scale_x_continuous(breaks=c(0:15)) +
+    theme(legend.position = 'none', plot.title = element_text(size=10)) + theme_bw()
+  # Save to local 
+  ggsave(paste0(graph_name,'_degree_distribution.pdf'),width = 15, height = 10, units = 'cm')
+  
+  print('Degree distribution plot has been saved.')
+  
+  ### Edges statistics
+  bact.ig <- adj2igraph(getRefit(bact.spezy),  vertex.attr=list(name=taxa_names(bact_plsq)))
+  fungi.ig <- adj2igraph(getRefit(fungi.spezy),  vertex.attr=list(name=taxa_names(fungi_plsq)))
+  Multi.k.ig <- adj2igraph(getRefit(Multi.spezy),  vertex.attr=list(name=c(taxa_names(bact_plsq),taxa_names(fungi_plsq))))
+  # count edges
+  # Edges df
+  bact.edges <- edge_counter(bact.ig)
+  Edges_count[[length(Edges_count)+1]] <<- bact.edges
+  
+  fungi.edges <- edge_counter(fungi.ig)
+  Edges_count[[length(Edges_count)+1]] <<- fungi.edges
+  
+  Multi.k.edges <- multik_edges_counter(Multi.k.ig,cdi_bact,cdi_fungi)
+  Edges_count[[length(Edges_count)+1]] <<- Multi.k.edges
+  Mkec <- colSums(Multi.k.edges[2:6])
+  
+  # construct df for plot
+  test.df <- data.frame('holder'=c('Bact','Bact-Fungi','B-Multi', 'Fungi','Fungi-Bact','F-Multi',
+                                 'Multi.K.Bact-Bact','Multi.K.Bact-Fungi','Multi.K.Fungi-Fungi','Multi.K.Fungi-Bact'),
+                      'type'=c('Bacteria','Bacteria','Bacteria','Fungi','Fungi','Fungi',
+                               'Multi-Kingdom','Multi-Kingdom','Multi-Kingdom','Multi-Kingdom'),
+                      'edges'=rep(0,10))
+  
+  # append date
+  test.df$edges[1] <- sum(bact.edges$edges)
+  test.df$edges[4] <- sum(fungi.edges$edges)
+  # append data
+  test.df$edges[7] <- Mkec[[2]] # BB
+  test.df$edges[8] <- Mkec[[3]] # BF
+  test.df$edges[9] <- Mkec[[5]] # FF
+  test.df$edges[10] <- Mkec[[4]] # FB
+  
+  temp_palette <- c('white','plum4','white',
+                  'white','chocolate3','white',
+                  'plum4','lightsteelblue4','lightsteelblue4','chocolate3')
+  
+  # save plot  
+  ggplot(test.df,aes(type,edges,fill = holder))+
+    geom_bar(stat='identity', alpha = 0.8, width=0.65)+
+    labs(x='',y='Number of edges',
+         title = 'Nasal network number of edges',
+         subtitle = paste(graph_name)) + 
+     scale_x_discrete(labels=c("Bacteria" = "Bacteria \nnetwork", 
+                              "Fungi" = "Fungi \nnetwork",
+                              "Multi-Kingdom" = "Multi Kingdom \nnetwork")) +
+    scale_fill_manual(values = temp_palette)  + 
+    theme_light() + 
+    theme(legend.position = 'none')
+  
+  ggsave(paste0(graph_name,'_number_of_edges.pdf'),width = 10, height = 10, units = 'cm')
+  
+  print('Number of edges plot has been saved.')
+  
+  #
+  Spezy_models[[length(Spezy_models)+1]] <<- test.df
+  
+}
+```
+
+## Run 3 Type of groups
+1. Wheeze only - fungi only, bact only, bact & fungi
+```{r}
+# Extract for Wheeze group only
+wo.bact.1Y <- prune_samples(sample_data(bact.1Y)$Group == 'Wheeze',bact.1Y)
+wo.fungi.1Y <- prune_samples(sample_data(fungi.1Y)$Group == 'Wheeze',fungi.1Y)
+
+# ### Normalization
+otu_table(wo.bact.1Y)<-otu_table(MRcounts(cumNorm(phyloseq_to_metagenomeSeq(wo.bact.1Y),p=cumNormStatFast(phyloseq_to_metagenomeSeq(wo.bact.1Y))),norm=TRUE, log=TRUE), taxa_are_rows=TRUE)
+  # 
+otu_table(wo.fungi.1Y)<-otu_table(MRcounts(cumNorm(phyloseq_to_metagenomeSeq(wo.fungi.1Y),p=cumNormStatFast(phyloseq_to_metagenomeSeq(wo.fungi.1Y))),norm=TRUE, log=TRUE), taxa_are_rows=TRUE)
+
+# apply top prevalence filtering, top 100, minireads 2000
+wo.phyloss<- Top_prevalence_pipeline(wo.bact.1Y,wo.fungi.1Y,0,100)
+# get Phyloseq objects
+wo.t100.bact.1Y <- wo.phyloss[[1]]
+wo.t100.fungi.1Y <- wo.phyloss[[2]]
+
+print(wo.phyloss[[3]])
+print(wo.phyloss[[4]])
+
+# run pipeline
+Spezy_pipeline(wo.t100.bact.1Y,wo.t100.fungi.1Y,'WheezeOnly')
+```
+
+2. Healthy only - fungi only, bact only, bact & fungi
+```{r}
+# Extract for Wheeze group only
+ho.bact.1Y <- prune_samples(sample_data(bact.1Y)$Group == 'Healthy',bact.1Y)
+ho.fungi.1Y <- prune_samples(sample_data(fungi.1Y)$Group == 'Healthy',fungi.1Y)
+
+# ### Normalization
+otu_table(ho.bact.1Y)<-otu_table(MRcounts(cumNorm(phyloseq_to_metagenomeSeq(ho.bact.1Y),p=cumNormStatFast(phyloseq_to_metagenomeSeq(ho.bact.1Y))),norm=TRUE, log=TRUE), taxa_are_rows=TRUE)
+  # 
+otu_table(ho.fungi.1Y)<-otu_table(MRcounts(cumNorm(phyloseq_to_metagenomeSeq(ho.fungi.1Y),p=cumNormStatFast(phyloseq_to_metagenomeSeq(ho.fungi.1Y))),norm=TRUE, log=TRUE), taxa_are_rows=TRUE)
+
+# apply top prevalence filtering, top 100, minireads 2000
+ho.phyloss<- Top_prevalence_pipeline(ho.bact.1Y,ho.fungi.1Y,0,100)
+# get Phyloseq objects
+ho.t100.bact.1Y <- ho.phyloss[[1]]
+ho.t100.fungi.1Y <- ho.phyloss[[2]]
+
+print(ho.phyloss[[3]])
+print(ho.phyloss[[4]])
+
+# run pipeline
+Spezy_pipeline(ho.t100.bact.1Y,ho.t100.fungi.1Y,'HealthyOnly')
+```
+3. Both wheeze and healthy - bact only, fungi only, bact & fungi
+```{r}
+# run pipeline
+#all.edges<-Spezy_pipeline(t100.bact.1Y,t100.fungi.1Y,'AllType')
+```
+
+## Compare egdes counts for multi-kingdom
+```{r}
+# wheeze only multi-kingdom model
+wo_multi.k_ec <- Edges_count[[3]]
+wo_multi.k_ec <- colSums(wo_multi.k_ec[2:6])
+ho_multi.k_ec <- Edges_count[[6]]
+ho_multi.k_ec <- colSums(ho_multi.k_ec[2:6])
+all_multi <- as.data.frame(rbind(wo_multi.k_ec,ho_multi.k_ec))
+all_multi$type[1] <- 'Wheeze'
+all_multi$type[2] <- 'Healthy'
+all_multi$edges <- all_multi$edges - all_multi$F2B
+all_multi$F2B <- NULL
+#
+all_multi <- all_multi %>% 
+    pivot_longer(
+      cols = B2B:F2F,
+      names_to='interaction',
+      values_to='int.edges')
+#
+
+# percentage 
+all_multi$per.edges <- all_multi$int.edges / all_multi$edges
+
+png(file = paste0('/Users/senmnes/DESKTOP_HD/Bernet_6th/Network_plots/Compare_egdes_multi-k.png'), width = 1210, height = 1210, units='px')
+#
+ggplot(all_multi,aes(type,per.edges,fill=interaction)) +
+  geom_bar(stat='identity',alpha = 0.95, width=0.6) +
+  labs(x='',y='Proportion', title = 'Nasal networks number of edges') +
+  scale_fill_manual(values = c('plum4','lightsteelblue','chocolate3'),
+                     labels = c('Bacteria-bacteria\n(inter-kingdom interaction)',
+                                'Bacteria-fungi\n(cross-kingdom interaction)',
+                                'Fungi-fungi\n(inter-kingdom interaction)')) +
+  scale_x_discrete(labels=c("Healthy"="HealthyOnly \nCross-kingdom networks","Wheeze"="WheezeOnly \nCross-kingdom networks")) +
+  theme_light() +
+  theme(legend.position = 'right', legend.title=element_blank(),
+          text = element_text(size=30),
+          legend.background = element_rect(linetype="solid",colour ="black"),
+          legend.key.size = unit(2,"cm")) + guides(alpha="none")
+
+dev.off()
+```
+
+## Edges for Moraxella
+```{r}
+# wheeze only multi-kingdom model
+wo_multi.k_ec <- Edges_count[[3]]
+ho_multi.k_ec <- Edges_count[[6]]
+# target 
+wo.mora <- wo_multi.k_ec[(wo_multi.k_ec$taxa == "s.Moraxella_catarrhalis_12"),]
+wo.mora$type <- 'Wheeze'
+ho.mora <- ho_multi.k_ec[(ho_multi.k_ec$taxa == "s.Moraxella_catarrhalis_12"),]
+ho.mora$type <- 'Healthy'
+#
+all_mora <- rbind(wo.mora,ho.mora)
+all_mora <- all_mora %>% 
+    pivot_longer(
+      cols = B2B:F2F,
+      names_to='interaction',
+      values_to='int.edges')
+all_mora <- all_mora[(all_mora$int.edges!=0),]
+#
+png(file = paste0('/Users/senmnes/DESKTOP_HD/Bernet_6th/Network_plots/Edges_for_Moraxella.png'), width = 1210, height = 1210, units='px')
+#
+ggplot(all_mora,aes(type,int.edges,fill=interaction)) +
+  geom_bar(stat='identity',alpha = 0.95, width=0.7) +
+  labs(x='',y='Number of edges',subtitle ="s.Moraxella_catarrhalis_12") +
+  scale_fill_manual(values = c('violetred4','tan4'),
+                    labels = c('Bacteria-bacteria\n(inter-kingdom interaction)','Fungi-fungi\n(inter-kingdom interaction)')) +
+  scale_x_discrete(labels=c("Healthy"="HealthyOnly \ncross-kingdom networks","Wheeze"="WheezeOnly \ncross-kingdom networks")) +
+  theme_bw() +
+  theme(legend.position = 'right', legend.title=element_blank(),
+          legend.background = element_rect(linetype="solid",colour ="black"),
+          legend.key.size = unit(2.5,"cm"),
+          text = element_text(size = 30),
+          plot.subtitle = element_text(size = 45, face = "bold")) + guides(alpha="none")
+
+dev.off()
+```
+
+# legend ticks for netwrok plot
+```{r}
+lt <- data.frame('Node'=c('Bacteria','Fungi'),'x'=c(0,1),'y'=c(0,1))
+
+ggplot(lt,aes(x,y,color=Node))+geom_point(size=7,alpha=0.8)+
+  scale_color_manual(values = c('plum4','chocolate3'))+
+  theme_bw()+
+  theme(legend.position = 'right',
+          legend.background = element_rect(linetype="solid",colour ="black"),
+          legend.key.size = unit(1,"cm"),
+          text = element_text(size = 25)) + guides(alpha="none")
+```

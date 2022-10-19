@@ -1,0 +1,1400 @@
+---
+title: "MS_downstream.v2"
+author: "Shihan Zhang"
+date: '2022-09-15'
+output: html_document
+---
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+	echo = TRUE,
+	message = FALSE,
+	warning = FALSE
+)
+```
+
+# Build virtul environment for new project
+```{r}
+#renv::init()
+#renv::restore()
+```
+
+# Load packages
+```{r}
+library(readxl)
+library(phyloseq)
+library(decontam)
+library(metagenomeSeq)
+library(vegan)
+#library(ANCOMBC) need fix
+library(ggplot2)
+library(ggside)
+library(ggsignif)
+library(ggpubr)
+library(gridExtra)
+library(ComplexHeatmap)
+library(fantaxtic)
+library(dplyr)
+library(tidyverse)
+library(hydroTSM)
+library(lubridate, warn.conflicts = FALSE)
+#library(DESeq2)
+library(edgeR)
+library(Maaslin2)
+library(microbiome)
+library(RColorBrewer)
+# if (!require("BiocManager", quietly = TRUE))
+#     install.packages("BiocManager")
+# 
+# BiocManager::install("ComplexHeatmap")
+
+# save package setups
+# renv::snapshot()
+```
+
+### ggplot setting
+```{r}
+# color code
+custom_palette <- c("cadetblue4","lightsalmon3","dodgerblue2",'gold','deeppink','red4','purple','green4','black')
+  # color setting
+qual_col_pals = brewer.pal.info[brewer.pal.info$category == 'qual',]
+col_vector = unlist(mapply(brewer.pal, qual_col_pals$maxcolors, rownames(qual_col_pals)))
+col_vector[13] <- 'firebrick'
+col_vector[19] <- 'wheat3'
+col_vector[20] <- 'cyan3'
+```
+
+
+# ITS Data Import
+```{r data import}
+# Load data from ITS pipeline outputs
+# sequence table - OTU table - OTU counts for each sample
+fungi.seqtab <- t(data.frame(readRDS('/Volumes/GoogleDrive/Shared drives/Zack Bioinformatics Project/Microbiome downstream/seqtab_nochim.rds')))
+
+# taxonomy table
+fungi.taxonomy <- data.frame(readRDS('/Volumes/GoogleDrive/Shared drives/Zack Bioinformatics Project/Microbiome downstream/taxonomy.rds'))
+
+# clinical metadata
+metadata <- read_csv('/Users/senmnes/DESKTOP_HD/Bernet_6th/MS_downstream/Metadata_2022.csv')
+
+# phylogenetic tree file
+fungi.tree <- readRDS('/Volumes/GoogleDrive/Shared drives/Zack Bioinformatics Project/Microbiome downstream/tree.rds')
+
+# Sample Status data
+samplestatus <- read_csv('/Users/senmnes/DESKTOP_HD/Bernet_6th/MS_downstream/Sample_status - Sheet1.csv')
+```
+
+## Data Wrangling
+Minor adjustment for original observations for easier ploting in later steps
+```{r}
+# Add groups
+# Rename clip identification
+metadata$WheezeClip <- ifelse(metadata$WheezeClip1YEAR=='ConfirmedWheeze', 'Yes right clip',ifelse(metadata$WheezeClip1YEAR=='WrongClipWheeze', 'Other clip', 'No clip'))
+# Add a 'Wheeze' column merging confirmed and unconfirmed wheezers
+metadata$Wheeze <- ifelse(metadata$WheezeClip1YEAR=='No', 'No', 'Yes')
+# add groups
+metadata$Group <- ifelse(metadata$Wheeze =='No', 'Healthy', 'Wheeze')
+
+# Clinical covariates relevant for 1 year time point
+clinical_factors <- c('WheezeClip','DoctorVisitsAsthmaWheeze1YEAR','EmergencyVisitsAsthmaWheeze1YEAR','HospitalAdmissionsAsthmaWheeze1YEAR','DiagnosedBronchiolitis1YEAR','ChestInfections1YEAR','Colds1YEAR','DryCoughAtNight1YEAR','Sneezing1YEAR','FoodAdverseReactions1YEAR','Rash1YEAR')
+
+# Genetic/hereditary covariates relevant for all time points
+genetic_factors <- c('MotherAsthma','FatherAsthma','MotherEczema','FatherEczema',
+                     'MotherHayfever','FatherHayfever',
+                     'Gender')
+
+# Environmental covariates relevant for 1 year time point
+environmental_factors <- c('DayCare1YEAR','TimeOfYear','NbHouse','ParentsSmoking','PetsAtHome1YEAR','BreastfeedingBirth','AbxSinceBorn1YEAR','Country')
+
+# Birth/pregnancy covariates relevant for all time points (particularly early ones)
+birth_pregnancy_factors <-c('DeliverySimplified','GestAgeBirth','WeightBirth','AbxCoursesPregnancy','BreastfeedingBirth')
+
+# update the records
+metadata$PetsAtHome1YEAR <- ifelse(metadata$PetsAtHome1YEAR == 'None', 'No', 'Yes')
+metadata$ParentsSmoking <- ifelse(metadata$FatherSmoke != 'Noneversmoked'|metadata$MotherSmoke != 'Noneversmoked', 'Yes', 'No')
+metadata$EthnicitySimplified <- ifelse(metadata$Ethnicity == 'WhiteBritish','British','Other')
+
+# Antibiotics Courses history
+#metadata$AbxSinceBorn1YEAR <- ifelse(metadata$AbxSinceBorn1YEAR == 0, 'No', 'Yes')
+#metadata$AbxSinceLastSeen3MTH <- ifelse(metadata$AbxSinceLastSeen3MTH == 'No', 'No', 'Yes')
+#metadata$AbxSinceLastSeen6MTH <- ifelse(metadata$AbxSinceLastSeen6MTH == 'No', 'No', 'Yes')
+```
+
+### Adding Age & Season
+```{r}
+# add season
+date_factor <- c('DateofVisitBaseline','DateofVisit1YEAR','DateofVisitAcute','DateofVisit3MTH','DateofVisit6MTH')
+
+# reformat date
+for(date_col in date_factor){
+  #print(date_col)
+  metadata[[date_col]] <- ymd(metadata[[date_col]])
+}
+# reformate the date records
+metadata$ParticipantsDateofbirth <- ymd(metadata$ParticipantsDateofbirth)#
+metadata$month1YEAR <- month(metadata$DateofVisit1YEAR)
+metadata$TimeOfYear <- ifelse(metadata$month1YEAR>=5 & metadata$month1YEAR<=10, 'Warm', 'Cold')
+
+# calculate age in month
+# 0
+metadata$AgeofVisitBaseline <- day(as.period(interval(start=metadata$ParticipantsDateofbirth,end=metadata$DateofVisitBaseline), unit='days'))/30.437
+# 3
+metadata$AgeofVisit3MTH <- day(as.period(interval(start=metadata$ParticipantsDateofbirth,end=metadata$DateofVisit3MTH), unit='days'))/30.437
+# 6 
+metadata$AgeofVisit6MTH <- day(as.period(interval(start=metadata$ParticipantsDateofbirth,end=metadata$DateofVisit6MTH), unit='days'))/30.437
+# 1YEAR
+metadata$AgeofVisit1YEAR <- day(as.period(interval(start=metadata$ParticipantsDateofbirth,end=metadata$DateofVisit1YEAR), unit='days'))/30.437
+# ACUTE
+metadata$AgeofVisitACUTE <- day(as.period(interval(start=metadata$ParticipantsDateofbirth,end=metadata$DateofVisitAcute), unit='days'))/30.437
+
+# At 1YEAR age, 1YEAR is the last observation collection point
+metadata$At1YEARpoint_Age <- NA
+for(i in seq_along(metadata$AgeofVisit1YEAR)){
+  if(is.na(metadata$AgeofVisit1YEAR[i])==F){
+      if(between(metadata$AgeofVisit1YEAR[i],0,3)){
+        metadata$At1YEARpoint_Age[i] <- '<3'
+      }else if(between(metadata$AgeofVisit1YEAR[i],3,6)){
+        metadata$At1YEARpoint_Agep[i] <- '3-6'
+      }else if(between(metadata$AgeofVisit1YEAR[i],6,12)){
+        metadata$At1YEARpoint_Age[i] <- '6-12'
+      }else if(between(metadata$AgeofVisit1YEAR[i],12,20)){
+        metadata$At1YEARpoint_Age[i] <- '>12'
+      }
+  }
+}
+
+# convert to season
+temp_date <- metadata$DateofVisit1YEAR
+metadata$Season1YEAR  <- str_to_title(time2season(temp_date,out.fmt="seasons"))
+# fix typo
+for(rows in seq_along(metadata$Season1YEAR)){
+  if (is.na(metadata$Season1YEAR[rows])){
+  }else if(metadata$Season1YEAR[rows] == 'Autumm'){metadata$Season1YEAR[rows] = 'Autumn'}
+}
+```
+
+## Extract Target barcodes
+Build up Sample Status barcode df
+- 'Baseline' all green
+- 'Baseline-NP' - all red
+- 'xxxxxxx-BLUE' - BLUE barcodes (not sequenced)
+```{r}
+NOT_Sequenced_1Y <- 9 # number of BLUE barcodes # 1YEAR
+
+# Add ITS tag for all sample status barcode
+for (cols in colnames(samplestatus)[-1]){
+  samplestatus[[cols]]<-ifelse((nchar(samplestatus[[cols]]) <= 7 | is.na(samplestatus[[cols]]) == T),NA,
+                         samplestatus[[cols]] <- paste('ITS',sep='.',samplestatus[[cols]]))
+}
+# long format is the correct way to assign groups
+# Transform to long format
+long_ss <- samplestatus %>% 
+  pivot_longer(
+    cols = Baseline:`Acute-NP`,
+    names_to='SampleCollection',
+    values_to='Barcode')
+
+# make a clean SS df without any BLUEs.
+long_ss <- long_ss[(grepl('BLUE',long_ss$Barcode)==F),]
+long_ss <- long_ss[!is.na(long_ss$Barcode),]
+```
+
+# Before PhyloSeq
+## Metadata transformation - before any wrangling steps to prevent index miss match
+This part requires `library(tidyverse)`
+1. Added negative control/barcodes into metadata. If the barcode IN the seqtab but NOT in the metadata, wee add these barcodes back into metadata.
+ 
+2. assign barcodes to be rowname for input for phyloseq package.
+- Reorder the barcodes. The barcodes from Metadata should follows the exactly same order as the Seqtab. 
+
+2.1 Label Negative controls. After adding the barcodes back to metadata, we now need to label the negative control with an extra column `IsNegativeCtrl`  
+ - Only `PCR` and `ExtrNeg` are negative controls. !!! Not include `Zymo`
+ - some Outliers observation like 'Notdone'/'Nitdone'/'refused' are originally from the data collection.
+ 
+- In this step, we will facing a problems which is the duplicated barcodes. In R, we are not allowed to have duplicated rownames. But at this stage, we are not planned to remove any duplicates barcodes. Therefore, we will back up the duplicated barcodes first, then remove the duplicated barcodes(sample) and NAs.
+
+```{r pre-process metadata}
+# Step 1
+# Transform the metadata with extract barcode as key
+barcodeList<-c(grep('BCNasalswab', colnames(metadata), value=TRUE))
+bcd_all <- c(grep('BCNasalbrushing', colnames(metadata), value=TRUE))
+# remove the barcode not for this study
+for(i in bcd_all){
+  metadata[[i]] <- NULL
+}
+
+# Transform to long format
+metadata <- metadata %>% 
+  pivot_longer(
+    cols = all_of(barcodeList), 
+    names_to='SampleCollection',
+    values_to='Barcode')
+```
+
+## Matching ITS.Seqtab with Sample Status file
+The barcodes not in the sample status file are not relevant with this study, we dont want them.
+But Seqtab contains negative control, we want to keep negative control but remove other barcode that not exsit in SS.
+```{r}
+# find the barcodes in ss but not in seqtab
+n_seq_y_ss <- colnames(fungi.seqtab)[!is.element(long_ss$Barcode,colnames(fungi.seqtab))]
+# in seqtab but not in ss
+y_seq_n_ss <- colnames(fungi.seqtab)[!is.element(colnames(fungi.seqtab),long_ss$Barcode)]
+# These barcodes will contain negative controls, we want to keep negative controls
+for(i in seq_along(n_seq_y_ss)){
+  if(grepl('PCRCtrl', n_seq_y_ss[i])){n_seq_y_ss[i] <- 0}
+  else if(grepl('ExtrNegCtrl', n_seq_y_ss[i])){n_seq_y_ss[i] <- 0}
+  else if(grepl('ZymoCtrl', n_seq_y_ss[i])){n_seq_y_ss[i] <- 0}
+  else{}
+}
+
+for(i in seq_along(y_seq_n_ss)){
+  if(grepl('PCRCtrl', y_seq_n_ss[i])){y_seq_n_ss[i] <- 0}
+  else if(grepl('ExtrNegCtrl', y_seq_n_ss[i])){y_seq_n_ss[i] <- 0}
+  else if(grepl('ZymoCtrl', y_seq_n_ss[i])){y_seq_n_ss[i] <- 0}
+  else{}
+}
+# clean up negative control and NAs
+n_seq_y_ss <- n_seq_y_ss[(n_seq_y_ss!='0')]
+n_seq_y_ss <- n_seq_y_ss[!is.na(n_seq_y_ss)]
+y_seq_n_ss <- y_seq_n_ss[(y_seq_n_ss!='0')]
+y_seq_n_ss <- y_seq_n_ss[!is.na(y_seq_n_ss)]
+
+# filter fungi.seqtab, remove the barcodes thats not in the ss
+fungi.seqtab <- fungi.seqtab[,!(colnames(fungi.seqtab) %in% y_seq_n_ss)]
+dim(fungi.seqtab) # original 355, now 335
+# check again, only return negative control group
+colnames(fungi.seqtab)[!is.element(colnames(fungi.seqtab),long_ss$Barcode)]
+```
+Here we have very interesting result, There are 2 type of matching we have done. 
+`n_seq_y_ss` has the barcode that appear in the SS but not in seqtab
+`y_seq_n_ss` has the barcode that appear in the Seqtab but not in SS
+
+- Given we trust in SS rather than Seqtab, so we can not add `y_seq_n_ss` back into SS.
+What we may do is remove the `y_seq_n_ss` so Seqtab can be more clear.
+- On the otherhand, `n_seq_y_ss` shows the barcode not having OUTs in the seqtab, because they not exsist in seqtab.
+
+---Metadata Transformation - Continues---
+This part requires `library(tidyverse)`
+1. Added negative control/barcodes into metadata. If the barcode IN the seqtab but NOT in the metadata, wee add these barcodes back into metadata.
+- some Outliers observation like 'Notdone'/'Nitdone'/'refused' are originally from the data collection. We want to remove them as well as the NAs.
+
+- 1.1. Filter the metadata by `Sample_Status_Wheeze` file
+  - We trust `Sample_Status_Wheeze` contains all the available samples, So we use SS to filter the metadata & Seqtab[done in above].
+  - But need to clear is, We filter metadata by SS first, add negative control back as second. Because SS DOSE NOT contains negative controls. 
+
+2. Label Negative controls. After adding the barcodes back to metadata, we now need to label the negative control with an extra column `IsNegativeCtrl`  
+ - Only `PCR` and `ExtrNeg` are negative controls. !!! Not include `Zymo`
+ 
+```{r}
+# Step 1
+# Extract the barcodes from seqtab
+seqtab_barcodes <- colnames(fungi.seqtab)
+
+# Add back the tag 'ITS', without editing NA and also assign the outliers to NA
+metadata$Barcode <- ifelse((nchar(metadata$Barcode) <= 7 | is.na(metadata$Barcode) == T),NA,metadata$Barcode <- paste('ITS',sep='.',metadata$Barcode))
+
+# Check the barcodes in Seqtab but not in metadata, Should only return Negative controls
+missing <- seqtab_barcodes[!(is.element(seqtab_barcodes, metadata$Barcode))]
+
+# Filter metadata base on the SS, PLEASE NOTE, metadata CAN NOT filter by fungi.seqtab as the fungi.seqtab contains less available barcodes than SS.
+metadata <- metadata[is.element(metadata$Barcode,long_ss$Barcode),]
+
+# Add Negative controls them back into metadata
+metadata <- metadata %>% add_row(Barcode = c(missing))
+
+# double check with SS
+metadata[!is.element(metadata$Barcode,long_ss$Barcode),]$Barcode # should only return negtaive controls
+
+# Step 2
+# label the negative controls with extra column`IsNegativeCtrl`
+metadata$IsNegativeCtrl <- ifelse((grepl('PCRCtrl', metadata$Barcode)|grepl('ExtrNegCtrl', metadata$Barcode)), 'YES','NO')
+
+# Step 2.1 reorder Dataframe[metadata] by the order of barcode of fungi.seqtab
+#metadata <- metadata[match(colnames(fungi.seqtab),metadata$Barcode),]
+seq_name <- colnames(fungi.seqtab)
+# merge, but is has duplicated value,so use unique()
+new_order <- unique(c(seq_name,metadata$Barcode))
+# now, the `new_order` following the extact order of fungi.seqtab with no removed barcode by match()
+metadata <- metadata[match(new_order,metadata$Barcode),]
+
+# re-assign the metadata to be a dataframe format.
+# Even the matadata looks like a dataframe in R, when we import the data, we using RDS fromats. So, right here we will re assign the metadta to be a dataframe file to prevent any bugs for phyloseq object generation. THIS IS REALLY IMPORTANT!!!
+metadata <- as.data.frame(metadata)
+# assign barcode to be rowname of metadata
+rownames(metadata) <- metadata$Barcode
+```
+
+#### Sample Status Data checking
+```{r}
+long_ss$Group <- NA
+# assign group values into long_ss
+for(i in long_ss$Barcode){
+  ss_barcd <- i
+  # get the match first, will return index
+  idx <- match(ss_barcd,metadata$Barcode)[1]
+  # by index, get value of group
+  grp_info <- metadata$Group[idx][1]
+  #  
+  idx_ss <- match(ss_barcd,long_ss$Barcode)[1]
+  long_ss$Group[idx_ss] <- grp_info
+}
+  
+# manually fix these 2 data
+long_ss[(long_ss$Barcode=='ITS.IBG102152A'),]$Group <- 'Wheeze'
+long_ss[(long_ss$Barcode=='ITS.EDG101702A'),]$Group <- 'Healthy'
+
+# no diagnosis group
+no_diagnosis <- long_ss[is.na(long_ss$Group),]
+
+# 
+# Again, some barcodes does not has a relevant group value, because they
+all(no_diagnosis$Barcode %in% colnames(fungi.seqtab))
+# #
+all(no_diagnosis$Barcode%in%(metadata$Barcode)) # all false, metadata is correct
+# 
+# # wheeze
+ss_wheeze <- long_ss[(long_ss$Group == 'Wheeze'),]
+# # healthy
+ss_healthy <- long_ss[(long_ss$Group == 'Healthy'),]
+```
+
+## Function to assign taxonomy id
+This function allows the creation of a new taxon name (ID) containing the highest taxonomic level to which the ASV has been assigned to.
+```{r}
+highest_taxClass <- function (x) {
+  y <- ifelse(is.na(x$Species), ifelse(is.na(x$Genus),
+                ifelse(is.na(x$Family),
+                       ifelse(is.na(x$Order),
+                              ifelse(is.na(x$Class),
+                                     ifelse(is.na(x$Phylum),
+                                            paste0("k.", x$Kingdom, "_", c(1:dim(x)[1])),
+                                          paste0("p.", x$Phylum, "_", c(1:dim(x)[1])) ),
+                                     paste0("c.", x$Class, "_", c(1:dim(x)[1])) ),
+                                  paste0("o.", x$Order, "_", c(1:dim(x)[1])) ),
+                       paste0("f.", x$Family, "_", c(1:dim(x)[1])) ),
+                paste0("g.", x$Genus, "_", c(1:dim(x)[1])) ),
+         paste0("s.", x$Genus, "_", x$Species, "_", c(1:dim(x)[1])) )
+  return(y)
+}
+fungi.taxonomy$ID <- highest_taxClass(fungi.taxonomy)
+```
+
+# Build PhyloSeq
+## Combine data into phyloseq object for downstream analysis
+This step will combine all the data into phyloseq object. The object `fungi` will carry have a comprehensive information.
+```{r}
+fungi <- phyloseq(
+          otu_table(fungi.seqtab, taxa_are_rows = TRUE),
+          sample_data(metadata),
+          tax_table(as.matrix(fungi.taxonomy)),
+          phy_tree(fungi.tree$tree)
+          )
+
+# rename the ASVs by taxa ID(highest taxonomic class)
+taxa_names(fungi) <- tax_table(fungi)[,'ID']
+```
+
+# Plot relative abundance
+```{r}
+# set color 
+PRA.color <- sample(col_vector)
+#
+PRA <- function(plsq_obj,plt_name){
+  # subset 1YEAR
+  plsq_RA <- subset_samples(plsq_obj, SampleCollection == "BCNasalswab1YEAR")
+  # select genus level
+  plsq_genus <- tax_glom(plsq_RA,"Genus")
+  # get top 20
+  top <- names(sort(taxa_sums(plsq_genus), decreasing = TRUE))[1:20]
+  # Calculate relative abundance
+  #fungi_genus.prop <- transform_sample_counts(fungi_genus, function(x) x / sum(x) )
+  plsq_genus.prop <- microbiome::transform(plsq_genus, "compositional")
+  # filter the top 20
+  plsq_genus.prop.20 <- prune_taxa(top, plsq_genus.prop)
+  
+  # Remove the "s.g__","g.g__" before the genus names.
+  taxa_names(plsq_genus.prop.20) <- gsub("g.g__", "", taxa_names(plsq_genus.prop.20))
+  taxa_names(plsq_genus.prop.20) <- gsub("s.g__", "", taxa_names(plsq_genus.prop.20))
+  # Remove the number behind
+  #taxa_names(fungi_genus.prop.20)<-gsub("[[:print:]][[:digit:]]","",taxa_names(fungi_genus.prop.20))
+  #taxa_names(fungi_genus.prop.20)<-gsub("[[:digit:]]","",taxa_names(fungi_genus.prop.20))
+  
+  plot_composition(plsq_genus.prop.20, sample.sort = NULL,
+                            otu.sort = NULL,
+                            plot.type = "barplot",
+                            verbose = FALSE) +
+    labs(x='',y="Relative abundance",fill='Genus', title = paste0(plt_name,'Top 20 taxa')) +
+    theme_light() + 
+    theme(axis.text.x = element_blank(),
+          axis.ticks.x=element_blank(),
+          legend.text = element_text(size=6),
+          legend.key.size = unit(4, 'mm')) +
+    scale_fill_manual(values = PRA.color) + 
+    theme(legend.position = 'right')
+}
+```
+
+```{r}
+fungi.BF <- fungi
+#
+pdf(file=paste0('/Users/senmnes/DESKTOP_HD/Bernet_6th/pre-process_plot','/BF.Fung1Y_top20.pdf'), width=8, height=4, useDingbats=F, compress=F)
+#
+  PRA(fungi.BF,'Fungi')
+#
+dev.off()
+```
+
+# After Build PhyloSeq
+## Pre-processing 
+This step will remove very low read samples. Also, the samples are decontaminated based on the negative controls composition using `decontam R package`
+
+1). Sample filtering based on the read counts(first round). Samples with less than 200 reads(even negative controls) need to be removed. As chances are hight that they just represent sequecing background. Not removing them can impact the read decontamination process.
+```{r}
+# check samples number
+print(paste('before FIRST ROUND removal: ',nsamples(fungi), 'samples'))
+
+# PLEASE NOTE!, the threshold number isnt same for all the cases, we need to manually test and found the capable one. 
+minreadsTreshold <- 200
+
+# filtering based on minimum threshold, colSums return a total reads count for each sample.
+fungi <- prune_samples(colSums(otu_table(fungi)) > minreadsTreshold, fungi)
+
+# check samples number
+print(paste('after  FIRST ROUND removal: ',nsamples(fungi), 'samples'))
+```
+
+2). Remove unclassified ASVs. If the ASV is not assigned at Phylum level(NA), it is high chance that this seqence is not a fungi(e.g. host-derived). These ASVs will be removed.
+```{r}
+# check the total counts of taxa
+print(paste('before Unclassified ASVs removal: ',ntaxa(fungi), 'taxonomy'))
+
+# only keep the ASVs which the Phylum is not NA.
+fungi <- subset_taxa(fungi, (!is.na(Phylum)))
+
+# check the total counts of taxa
+print(paste('after  Unclassified ASVs removal: ',ntaxa(fungi), 'taxonomy'))
+```
+
+3). ASVs decontamination 
+For microbiome data pre-processing(especially when working with low biomass samples). Decontamination is the key step! The `decontam` R package is used. with the prevalence method,
+as no absolute quantification is available. The threshold can be adjusted depending on the dataset (usually between 0.1 and 0.5 - less strict to more strict).
+- The function requires a vector (is.neg) to be TRUE to distinguish negative controls from the rest of the samples.
+```{r}
+# decontamination treshold
+threshold <- 0.5
+# negative control determine vector with pure Boolean value
+sample_data(fungi)$is.neg <- ifelse(grepl('PCRCtrl',sample_data(fungi)$Barcode)|
+                                    grepl('ExtrNegCtrl',sample_data(fungi)$Barcode), TRUE,FALSE)
+# distinguish negative controls
+contamdf.prev <- isContaminant(fungi, method='prevalence', neg='is.neg',threshold=threshold)
+# assign contam samples
+contam <- contamdf.prev[which(contamdf.prev$contaminant==TRUE),]
+
+# check how many contaminating ASVs
+table(contamdf.prev$contaminant)
+```
+
+Among possible plots, one can represent the prevalence of ASVs in negative controls vs actual samples and color code based on whether the ASV has been identified as a contaminant or not.
+```{r}
+# Make a new Phyloseq object of presence-absence in negative controls and true samples
+fungi_pa <- transform_sample_counts(fungi, function(abund) 1 * (abund > 0))
+fungi_pa_neg <- prune_samples(sample_data(fungi_pa)$is.neg == TRUE, fungi_pa)
+fungi_pa_pos <- prune_samples(sample_data(fungi_pa)$is.neg == FALSE, fungi_pa)
+
+# Make a data.frame of prevalence in positive and negative samples
+df_fungi_pa <- data.frame(fungi_pa_pos=taxa_sums(fungi_pa_pos),
+                        fungi_pa_neg=taxa_sums(fungi_pa_neg),
+                        contaminant=contamdf.prev$contaminant)
+
+# Plot the prevalence of taxa between positive and negative samples
+png(file=paste0('/Users/senmnes/DESKTOP_HD/Bernet_6th/pre-process_plot','/Fungi_containminant.png'), width=1410, height=1060, unit='px')
+
+    ggplot(df_fungi_pa,aes(x = fungi_pa_neg,y = fungi_pa_pos, color=contaminant)) +
+    geom_point(size = 7) +
+    labs(title = 'Fungi decontam',
+    x = 'Prevalence (Negative Controls)',
+    y = 'Prevalence (True Samples)') +
+    scale_color_manual(name = 'Contaminant', values = c('darkseagreen', 'indianred'))+
+    theme_bw() + 
+    theme(legend.position = 'right',
+          legend.background = element_rect(linetype="solid",colour ="black"),
+          text = element_text(size=30),legend.key.size = unit(1, "cm")) + guides(alpha="none")
+    
+dev.off()
+```
+
+This plot give a better view of how many samples 
+
+## ASVs decontamination - con.
+Remove ASVs decontamination - contaminants ASVs:
+```{r}
+# Remove the contaminants ASVs:
+# check taxa counts
+print(paste('before Contaminants ASVs removal: ',ntaxa(fungi), 'taxonomy'))
+
+contam_taxa <- c(rownames(contam))
+allTaxa <- taxa_names(fungi)
+allTaxa <- allTaxa[!(allTaxa %in% contam_taxa)]
+fungi <- prune_taxa(allTaxa,fungi)
+# check taxa counts
+print(paste('after  Contaminants ASVs removal: ',ntaxa(fungi), 'taxonomy'))
+```
+
+4) Aggregation of ASVs (optional) Aggregating ASVs at a given taxonomic level can help remove
+taxonomic redundancy and improve downstream analysis, such as differential abundance testing. ASVs can be aggregated at Species (best to conserve some resolution) or Genus levels. This step is optional.
+```{r}
+#fungi <- tax_glom(fungi, 'Species')
+```
+
+5) ASVs filtering based on Prevalence filtering allows the removal of rare ASVs. This steps can greatly improve downstream analysis such as differential abundance testing and multi-omics data inte-gration. mincountsThreshold represents the minimum ASV count and prevalenceTheshold the minimum proportion of samples that should have the minimum ASV count. The prevalence threshold is study and sample type specific but usually varies between 0.01 (1% of the samples) and 0.1 (10% of the samples). 
+The minimum ASV count usually varies between 1-10.
+```{r}
+# set parameters
+prevalenceTheshold <- 0.02 # 2% of the samples
+mincountsThreshold <- 1 # 1 ASV counts
+
+# check ASVs counts
+print(paste('before Rare ASVs removal: ',ntaxa(fungi)))
+# removing 
+fungi <- filter_taxa(fungi, function(x) sum(x>mincountsThreshold) > (prevalenceTheshold*length(x)), TRUE)
+# check ASVs counts
+print(paste('after  Rare ASVs removal: ',ntaxa(fungi)))
+```
+
+6) Samples filtering based on read counts (second round) At this step, samples with a low number of reads will be removed. The minimum read count threshold can vary depending on the sample type, the microbial diversity in the sample, whether we are dealing with 16S/ITS data and other parameters. Threshold typically ranges between 2’000 and 10’000 ASV counts.
+```{r}
+# minimum read threshold
+minreadsTreshold <- 2000
+
+# check number of samples
+print(paste('before low number reads sample removal: ',nsamples(fungi)))
+
+# filtering base on the threshold
+fungi <- prune_samples(colSums(otu_table(fungi)) > minreadsTreshold, fungi)
+
+# check number of samples
+print(paste('after  low number reads sample removal: ',nsamples(fungi)))
+```
+
+7) Remove positive controls
+We still have some positive controls in the samples, for later analysis they can become outliers. So we will remove them right here.
+```{r}
+# check number of samples
+print(paste('before positive control removal: ',nsamples(fungi)))
+
+# filtering base on the threshold
+fungi <- prune_samples(grepl('ZymoCtrl', sample_names(fungi)) == F, fungi)
+
+# check number of samples
+print(paste('after positive control removal: ',nsamples(fungi)))
+```
+plot the prevalence after all filtering steps
+```{r}
+pdf(file=paste0('/Users/senmnes/DESKTOP_HD/Bernet_6th/pre-process_plot','/AF.Fung1Y_top20.pdf'), width=8, height=4, useDingbats=F, compress=F)
+#
+  PRA(fungi,'Fungi') + labs(title = '')
+  
+dev.off()
+```
+
+
+# Aim 1. 
+## Alpha diversity analysis
+Alpha diversity metrics summarize the structure of an ecological community with respect to its richness (number of taxonomic groups), evenness (distribution of abundances of the groups), or both. One commonly used measure is the Shannon index (taking into account both abundance and evenness).
+
+Note: Alpha diversity is performed on non-normalized data.
+```{r}
+# subset 1YEAR 
+fungi.1Y <- prune_samples(sample_data(fungi)$SampleCollection == 'BCNasalswab1YEAR',fungi)
+# init Shannon index calculation resuls
+sample_data(fungi.1Y)$Shannon <- estimate_richness(fungi.1Y, split = TRUE, measures = c('Shannon'))[,1]
+sample_data(fungi.1Y)$Chao1 <- estimate_richness(fungi.1Y, split = TRUE, measures = c('Chao1'))[,1]
+# convert to dataframe for plots
+fungi1Y.data <- data.frame(sample_data(fungi.1Y))
+```
+
+## Plot the diversity & richness
+```{r}
+aim1_path <- '/Users/senmnes/DESKTOP_HD/Bernet_6th/aim1_plots'
+#### Diversity
+png(file=paste0(aim1_path,'/Aim1_Fungi_Diversity.png'), width=1210, height=1210,
+    unit= 'px')
+# 
+ggplot(fungi1Y.data, aes(x = Group, y = Shannon)) +
+    geom_boxplot(aes(y = Shannon,color=Group,fill=Group),width=0.7,outlier.size = -1) + 
+    geom_jitter(aes(y = Shannon,fill = Group,alpha=0.95),
+                shape = 21,width = 0.15,size = 6) +
+    stat_compare_means(hjust=-0.25,vjust=0.5,size= 13)+
+    labs(x='', y='Shannon index',
+         title = paste0('Fungal diversity')) +
+    scale_fill_manual(values = adjustcolor(custom_palette,alpha=0.65))  +
+    scale_color_manual(values = adjustcolor(custom_palette)) + 
+    ylim(0,max(fungi1Y.data$Shannon * 1.14))+theme_light()+ 
+    theme(legend.position = 'right',
+          legend.background = element_rect(linetype="solid",colour ="black"),
+          text = element_text(size=45),legend.key.size = unit(2, "cm"))+
+    guides(alpha="none")
+#
+dev.off()
+
+#### Richness
+png(file=paste0(aim1_path,'/Aim1_Fungi_Richness.png'), width=1210, height=1210, unit='px')
+# 
+print(ggplot(fungi1Y.data, aes(x = Group, y = Chao1)) +
+    geom_boxplot(aes(y = Chao1,color=Group,fill=Group),width=0.7,outlier.size = -1) + 
+    geom_jitter(aes(y = Chao1,fill = Group,alpha=0.95),
+                shape = 21,width = 0.15,size = 6) +
+    stat_compare_means(hjust=-0.25,vjust=0.5,size= 13)+
+    labs(x='', y='Chao1 index',
+         title = paste0('Fungal richness')) +
+    scale_fill_manual(values = adjustcolor(custom_palette, alpha = 0.6))  +
+    scale_color_manual(values = adjustcolor(custom_palette)) + 
+    ylim(0,max(fungi1Y.data$Chao1 * 1.14)) +theme_light()+ 
+      theme(legend.position = 'right',
+          legend.background = element_rect(linetype="solid",colour ="black"),
+          text = element_text(size=45),legend.key.size = unit(2, "cm"))+
+    guides(alpha="none"))
+
+dev.off()
+```
+
+## Normalization
+Normalization of ASV data is key to enable meaningful comparison of data from different measurements visualize amplicons data effectively. The preferred method is Cumulative Sum Scaling (CSS) implemented in the metagenomeSeq package, a method accounting for sparsity due to under-sampling.
+```{r}
+# convert into a normal distribution [1YEAR] 
+fungi.norm.1Y <- fungi.1Y
+# normalized otu table
+otu_table(fungi.norm.1Y) <-otu_table(MRcounts(cumNorm(phyloseq_to_metagenomeSeq(fungi.norm.1Y),p=cumNormStatFast(phyloseq_to_metagenomeSeq(fungi.norm.1Y))),norm=TRUE, log=TRUE), taxa_are_rows=TRUE)
+#
+sample_data(fungi.norm.1Y)$Group <- factor(sample_data(fungi.norm.1Y)$Group,levels=c('Healthy','Wheeze'))
+```
+
+## Beta diversity analysis
+Beta diversity is a measure of how similar (or dissimilar) the samples are between eachother, and is usually represented by a distance matrix which is then used to do Principal Coordinates Analysis (PCoA). The result of this is an ordination plot of multiple dimensions, where each sample is a point and the distance between the points represents the similarity of those samples (closer together = more similar). When a phylogenetic tree is available (e.g. when running the dada2 pipeline), the unifrac distance can be calculated (taking into accounts phylogeny). Another common distance is Bray Curtis (bray), which can be used if a phylogenetic tree is not provided.
+
+Note: Beta diversity is usually calculated on normalized data.
+
+1) Visualization
+The distance matrix is used to do Principal Coordinates Analysis (PCoA).
+```{r}
+# Weighted Unifrac
+fungi_ord_Wunifrac <- ordinate(fungi.norm.1Y, 'PCoA',"unifrac", weighted=TRUE)
+
+# make plot
+png(file = paste0(aim1_path,'/Aim1_Fungi_Beta_Diversity.png'),width=1410, height=1410, unit='px')
+#
+print(plot_ordination(fungi.norm.1Y, fungi_ord_Wunifrac, color='Group') +
+          stat_ellipse(geom = "polygon", linetype=0, alpha=0.25, aes(fill=Group))+
+          geom_point(size=7)+
+          labs(title = paste0('Fungi weighted Unifrac PCoA')) +
+            xlab(paste0('PCoA1 ',round(fungi_ord_Wunifrac$values$Relative_eig*100)[1],'%'))+
+            ylab(paste0('PCoA2 ',round(fungi_ord_Wunifrac$values$Relative_eig*100)[2],'%'))+
+            scale_fill_manual(values = adjustcolor(custom_palette, alpha = 0.6))  +
+            scale_color_manual(values = adjustcolor(custom_palette)) +
+            geom_xsidedensity(aes(fill=Group),alpha=0.55) + 
+            geom_ysidedensity(aes(fill=Group),alpha=0.55) + theme_light() + 
+            theme(axis.text.x=element_blank(),
+                  axis.ticks.x=element_blank(),
+                  axis.text.y=element_blank(),
+                  axis.ticks.y=element_blank())+
+            theme(legend.position = c(0.78, 0.1),legend.title = element_blank(),
+                  legend.background = element_rect(linetype="solid",colour ="black"),
+                  text = element_text(size=45),legend.key.size = unit(2, "cm")))
+#
+dev.off()
+```
+
+## Differential abundance testing with Maaslin2
+```{r}
+# build maasline analysis result
+aim1_mas <- Maaslin2(
+    input_data = otu_table(fungi.norm.1Y), 
+    input_metadata = as.data.frame(sample_data(fungi.norm.1Y)), 
+    min_prevalence = 0,
+    normalization = "NONE",
+    transform = 'NONE',
+    output = "aim1", 
+    max_significance = 0.05,
+    fixed_effects = c("Group"),
+    standardize = FALSE)
+
+# make a df for plot
+aim1_mas <- aim1_mas$results
+# transfor to long format
+aim1_mas <- aim1_mas %>%
+    dplyr::filter(qval < 0.05) %>%
+rownames_to_column(var = "id")
+# add new variable
+aim1_mas$is.neg <- ifelse(aim1_mas$coef>=0,'Wheeze','Healthy')
+
+#### LM coeffecient plot
+png(file = paste0(aim1_path,'/Aim1_Differential_testing.png'), width = 1410, height = 880, unit='px')
+print(ggplot(aim1_mas, aes(x = reorder(feature,-coef), y = coef, fill = is.neg)) +
+  geom_bar(stat="identity", width = 0.7) +
+  coord_flip() +
+  geom_hline(yintercept = 0, linetype="dotted") + 
+  ylim(-2, 0.5) +
+  labs(x='', y='LM coefficient',title='Fungi DA testing')+
+  scale_fill_manual(values = adjustcolor(c("cadetblue4","lightsalmon3")),
+                                         labels=c('Healthy','Wheeze')) + 
+  theme_light() + 
+  theme(legend.position = c(0.91,0.91),legend.title = element_blank(),
+        legend.background = element_rect(linetype="solid",colour ="black"),
+        text = element_text(size=30),legend.key.size = unit(2, "cm")))
+#
+dev.off()
+```
+
+## PSTA
+- plot significant taxa abundance
+```{r}
+PSTA <- function(taxa,factor,norm.plsq){
+  # subset sample
+  atr <- unique(sample_data(norm.plsq)[[factor]])
+  wo_sta <- prune_samples(sample_data(norm.plsq)[[factor]] == atr[1],norm.plsq)
+  ho_sta <- prune_samples(sample_data(norm.plsq)[[factor]] == atr[2],norm.plsq)
+  # subset taxa
+  wo_sta <- prune_taxa(taxa_names(norm.plsq) == taxa, wo_sta)
+  ho_sta <- prune_taxa(taxa_names(norm.plsq) == taxa, ho_sta)
+  #
+  x<- as.data.frame(otu_table(wo_sta))
+  y<- as.data.frame(otu_table(ho_sta))
+  #
+  x <- x%>% pivot_longer(everything(),names_to='Sample',values_to = 'count')
+  y <- y%>% pivot_longer(everything(),names_to='Sample',values_to = 'count')
+  #
+  x$type <- atr[1]
+  y$type <- atr[2]
+  all_xy <- rbind(x,y)
+  
+  # boxplot
+  plt<-ggplot(all_xy, aes(type,count)) + 
+    geom_boxplot(aes(y = count, fill = type), alpha=0.6,width= 0.7,outlier.size = -1)+
+    stat_compare_means(paired = FALSE,hjust = -0.25, size=10)+
+    geom_jitter(aes(fill = type),shape = 21,width = 0.15,size=7) +
+    labs(color = 'Group',fill = 'Group',x='',y='Abundance(logCSS)', title = taxa) +
+    scale_fill_manual(values=c('cadetblue4','lightsalmon3')) +
+    theme_light() + theme(legend.position = 'right',
+                          plot.title = element_text(face = "bold"),
+                          text = element_text(size=30),legend.key.size = unit(2, "cm"))
+  
+  return(plt)
+}
+```
+
+```{r}
+png(file = paste0(aim1_path,'/fungi_PSTA_142.png'), width = 1210, height = 1210, unit='px')
+  PSTA('o.o__Capnodiales_142','Group',fungi.norm.1Y)
+dev.off()
+```
+
+
+# Aim 2. 
+## Pearson correlation test
+- Numerical type records
+```{r}
+numerical.variables <-c('AbxCoursesPregnancy','GestAgeBirth','WeightBirth','ChestInfections1YEAR','Colds1YEAR','DiagnosedBronchiolitis1YEAR','AbxSinceBorn1YEAR','NbHouse')
+```
+
+```{r}
+pearson.corr_test<-function(plsq_df){
+  # result df
+  res_df <- data.frame('factor'=numerical.variables,'correlation'=rep(0,length(numerical.variables)),'pearson.p.value' = rep(0,length(numerical.variables)))
+  #
+  for(f in numerical.variables){
+    plsq_df[[f]] <- as.numeric(plsq_df[[f]])
+    variable <- unique(plsq_df[[f]])
+      if(length(variable)!=0){
+        # Corr test
+        res <- cor.test(plsq_df$Shannon, plsq_df[[f]])
+        # append value
+        res_df[(res_df$factor == f),]$pearson.p.value <- res$p.value
+        res_df[(res_df$factor == f),]$correlation <- res$estimate[[1]]
+      }else{
+        res_df[(res_df$factor == f),]$wilcox.p.value <- NA
+        res_df[(res_df$factor == f),]$correlation <- NA
+      }
+  }
+  return(res_df)
+}
+
+Fungi.pc <- pearson.corr_test(fungi1Y.data)
+```
+
+## Wilcoxon test
+```{r}
+wilconxon_test<-function(plsq_df){
+  factor_sets <- c(genetic_factors,birth_pregnancy_factors,clinical_factors,environmental_factors)
+  # result df
+  res_df <- data.frame('factor'=factor_sets,'wilcox.p.value'=rep(0,length(factor_sets)),'W' = rep(0,length(factor_sets)))
+  #
+  for(f in factor_sets){
+    plsq_df[[f]] <- as.factor(plsq_df[[f]])
+    
+    if(f %in% numerical.variables == F){
+      variable <- unique(plsq_df[[f]])
+      if(length(variable)>=2){
+        # subset Shannon index by variable
+        v1_shannon <- plsq_df[(plsq_df[[f]] == variable[1]),]$Shannon
+        v2_shannon <- plsq_df[(plsq_df[[f]] == variable[2]),]$Shannon
+        # Wilconxon test
+        res <- wilcox.test(v1_shannon, v2_shannon)
+        # append value
+        res_df[(res_df$factor == f),]$wilcox.p.value <- res$p.value
+        res_df[(res_df$factor == f),]$W <- res$statistic[[1]]
+      }else{}
+    }else{
+      res_df[(res_df$factor == f),]$wilcox.p.value <- NA
+      res_df[(res_df$factor == f),]$W <- NA
+    }
+  }
+  return(res_df)
+}
+#
+Fungi.wt<-wilconxon_test(fungi1Y.data)
+```
+
+## Alpha diversity
+### AbxSinceBorn1YEAR
+```{r}
+aim2_path <- '/Users/senmnes/DESKTOP_HD/Bernet_6th/aim2_plot'
+#### Diversity
+png(file = paste0(aim2_path,'/Aim2_FD_AbxSinceBorn1YEAR.png'), width = 1210, height = 1210, units='px')
+# 
+ggplot(fungi1Y.data, aes(x = AbxSinceBorn1YEAR, y = Shannon)) +
+    geom_smooth(method = lm, span = 0.1, size = 5)+
+    geom_point(aes(y = Shannon,fill = Group),shape = 21,width = 0.15,size=7) +
+    stat_cor(method = "pearson",size=13,hjust=-0.8) +
+    labs(x='', y='Shannon index',
+         title = 'Fungal diversity',
+         subtitle = paste0('Number of antibiotics used before 1YEAR')) +
+    scale_fill_manual(values = adjustcolor(custom_palette))  +
+    scale_color_manual(values = adjustcolor(custom_palette)) + 
+    ylim(0,max(fungi1Y.data$Shannon * 1.14))+
+    theme_bw() + theme(legend.position = 'right',
+                       legend.background = element_rect(linetype="solid",colour="black"),
+                          plot.subtitle = element_text(face = "bold",hjust=0.5),
+                          text = element_text(size=30),legend.key.size = unit(2, "cm"))+
+  guides(alpha="none")
+#
+dev.off()
+```
+
+### TimeOfYear
+```{r}
+#### Diversity
+png(file = paste0(aim2_path,'/Aim2_FD_TimeOfYear.png'), width = 1210, height = 1210, units = 'px')
+# 
+ggplot(fungi1Y.data, aes(x = TimeOfYear, y = Shannon)) +
+    geom_boxplot(aes(y = Shannon),width=0.7,outlier.size = -1) + 
+    geom_jitter(aes(y = Shannon,fill = Group),shape = 21,width = 0.15,size=7) +
+    stat_compare_means(paired = FALSE,vjust = 0.5, hjust = -0.25, size = 13)+
+    labs(x='', y='Shannon index',
+         title = 'Fungal diversity',
+         subtitle = paste0('Temperature of the sampling season')) +
+    scale_fill_manual(values = adjustcolor(custom_palette))  +
+    scale_color_manual(values = adjustcolor(custom_palette)) + 
+    ylim(0,max(fungi1Y.data$Shannon * 1.14)) +
+    theme_bw() + theme(legend.position = 'right',
+                       legend.background = element_rect(linetype="solid",colour="black"),
+                          plot.subtitle = element_text(face = "bold",hjust=0.5),
+                          text = element_text(size=30),legend.key.size = unit(2, "cm"))+
+  guides(alpha="none")
+#
+dev.off()
+```
+
+### Daily Temprature
+- Region & Daily temperature in UK
+EDG - Edinburgh
+IBG - London Imperial College
+ABG - Aberdeen
+QMG - London Queen Mary University Hospital
+IWG - Isle of Wight
+```{r}
+# init phyloseq obj
+fungi.1Y_rt <- fungi.1Y
+# log css normalization for otu_table
+otu_table(fungi.1Y_rt) <-otu_table(MRcounts(cumNorm(phyloseq_to_metagenomeSeq(fungi.1Y_rt),p=cumNormStatFast(phyloseq_to_metagenomeSeq(fungi.1Y_rt))),norm=TRUE, log=TRUE), taxa_are_rows=TRUE)
+
+# load temperature data
+EDG_temp<-read_csv('/Users/senmnes/DESKTOP_HD/Bernet_6th/clinical_data_wrangling/EDG_temp.csv')
+IWG_temp<-read_csv('/Users/senmnes/DESKTOP_HD/Bernet_6th/clinical_data_wrangling/IWG_temp.csv')
+ABG_temp<-read_csv('/Users/senmnes/DESKTOP_HD/Bernet_6th/clinical_data_wrangling/ABG_temp.csv')
+London_temp<-read_csv('/Users/senmnes/DESKTOP_HD/Bernet_6th/clinical_data_wrangling/London_temp.csv')
+
+# add temperature 
+# init new column
+sample_data(fungi.1Y_rt)$DailyTemp <- NA
+
+# looping the Region code
+for(i in seq_along(sample_data(fungi.1Y_rt)$Center)){
+  # check region 
+  if(sample_data(fungi.1Y_rt)$Center[i] == 'EDG'){
+    # matched; looping daily temperature
+    for(k in seq_along(EDG_temp$temp)){
+      # check date
+      if(sample_data(fungi.1Y_rt)$DateofVisit1YEAR[i]==EDG_temp$datetime[k]){
+        # matched; assign Daily temperature to metadata
+        sample_data(fungi.1Y_rt)$DailyTemp[i]<- EDG_temp$temp[k]
+      }
+    }
+  }else if(sample_data(fungi.1Y_rt)$Center[i] == 'IWG'){
+    for(k in seq_along(IWG_temp$temp)){
+      # check date
+      if(sample_data(fungi.1Y_rt)$DateofVisit1YEAR[i]==IWG_temp$datetime[k]){
+        # set temp
+        sample_data(fungi.1Y_rt)$DailyTemp[i]<- IWG_temp$temp[k]
+      }
+    }
+  }
+}
+
+# same process for other 2 regions
+for(i in seq_along(sample_data(fungi.1Y_rt)$Center)){
+  # check region 
+  if(sample_data(fungi.1Y_rt)$Center[i] == 'ABG'){
+    for(k in seq_along(ABG_temp$temp)){
+      # check date
+      if(sample_data(fungi.1Y_rt)$DateofVisit1YEAR[i]==ABG_temp$datetime[k]){
+        # set temp
+        sample_data(fungi.1Y_rt)$DailyTemp[i]<- ABG_temp$temp[k]
+      }
+    }
+  # note! IBG & QMG are both in London
+  }else if(sample_data(fungi.1Y_rt)$Center[i] == 'IBG'|sample_data(fungi.1Y_rt)$Center[i] == 'QMG' ){
+    for(k in seq_along(London_temp$temp)){
+      # check date
+      if(sample_data(fungi.1Y_rt)$DateofVisit1YEAR[i]==London_temp$datetime[k]){
+        # set temp
+        sample_data(fungi.1Y_rt)$DailyTemp[i]<- London_temp$temp[k]
+      }
+    }
+  }
+}
+
+# init plotting df
+sd_fungi.1Y_rt <- data.frame(sample_data(fungi.1Y_rt))
+# sorting the data frame by the order of Date(increasing timeline)
+sd_fungi.1Y_rt <- sd_fungi.1Y_rt %>% arrange(ymd(sd_fungi.1Y_rt$DateofVisit1YEAR)) 
+
+# run maaslin2 model
+temp_region_mas <- Maaslin2(
+    input_data = otu_table(fungi.1Y_rt), 
+    input_metadata = as.data.frame(sample_data(fungi.1Y_rt)), 
+    min_prevalence = 0.2,
+    normalization = "NONE",
+    transform = 'NONE',
+    output = "DailyTemp_mass", 
+    max_significance = 0.05,
+    fixed_effects = c('DailyTemp'),
+    standardize = FALSE)
+#
+tr_mas_all<- temp_region_mas$results %>%
+    dplyr::filter(pval < 0.05) %>%
+rownames_to_column(var = "id")
+# assign varibale for barplot
+tr_mas_all$is.neg <- ifelse(tr_mas_all$coef>=0,'No','Yes')
+
+# Building a new data frame with Date and Daily Temperature and then adding the abundance for each specific taxa can give an easier way for later plotting.
+#init df 
+rt_temp1 <- data.frame(Date=c(sample_data(fungi.1Y_rt)$DateofVisit1YEAR),
+                       temp=c(sample_data(fungi.1Y_rt)$DailyTemp))
+
+# loop all significant species
+for(i in seq_along(tr_mas_all$feature)){
+  # init list to store taxa count
+  taxa_cal <-c()
+  # set column names
+  col <- tr_mas_all$feature[i]
+  # prune_taxa to specific species
+  temp_x1 <- prune_taxa(c(tr_mas_all$feature[i]),fungi.1Y_rt)
+  # get taxa count, then append to list
+  # to ensure the taxa count under specific date, we subset sample with the Date, then uses taxa_sums to count abundance.
+  for(k in sample_data(temp_x1)$DateofVisit1YEAR)
+    taxa_cal<-append(taxa_cal,taxa_sums(subset_samples(temp_x1,sample_data(temp_x1)$DateofVisit1YEAR == k))[[1]])
+  # append to data frame as new column
+  rt_temp1[[col]] <- taxa_cal
+}
+```
+
+- line plot for Daily Temperature and fungi abundance
+```{r}
+png(file = paste0(aim2_path,'/Aim2_FD_DailyTemp.png'), width = 1210, height = 1410, units='px')
+# plot function
+  # line plot for Daily Temperature
+  a1 <- ggplot(rt_temp1, aes(Date,temp)) + geom_smooth(aes(color=..y..),size=15.5,se=F,method = 'loess',formula= y~x) +
+      geom_line(alpha=0.7,color='grey',size=1.5) +
+      labs(x='', y='Daily Temperature/°C',
+           subtitle = paste0('Daily average temperature in United Kingdom'))+ 
+      ylim(min(rt_temp1$temp)*1.1, max(rt_temp1$temp)*1.1) + 
+      scale_colour_gradient2(name='Temperature/°C',
+                             low = "blue", mid = "yellow" , high = "red", 
+                         midpoint=median(rt_temp1$temp)) + theme_bw() + 
+      theme(text = element_text(size=30),legend.position = 'none')
+  
+  # scatter plot for species abundance.
+  a2 <- ggplot(rt_temp1,aes(Date,y=g.g__Sporobolomyces_7))+
+       geom_point(size = 5) +
+       geom_smooth(size=5,method = 'loess',formula = y~x)+
+       ylim(0, max(rt_temp1$g.g__Sporobolomyces_7)*1.1) +
+       labs(x='', y='LogCSS abundance',
+            subtitle = paste0('g.g__Sporobolomyces_7'))+
+       theme_bw() + theme(legend.position="right",
+                          text = element_text(size=30),
+                          plot.subtitle = element_text(face = "bold"))
+                          
+    # scatter plot for species abundance.
+  a3 <- ggplot(rt_temp1,aes(Date,y=o.o__Capnodiales_4))+
+       geom_point(size = 5) +
+       geom_smooth(size=5,method = 'loess',formula = y~x)+
+       ylim(0, max(rt_temp1$o.o__Capnodiales_4)*1.1) +
+       labs(x='Date of Visit 1YEAR', y='LogCSS abundance',
+            subtitle = paste0('o.o__Capnodiales_4'))+
+       theme_bw() + theme(legend.position="right",
+                          text = element_text(size=30),
+                          plot.subtitle = element_text(face = "bold"))
+  
+print(ggarrange(a1,a2,a3,ncol=1,nrow =3,align = "v"),common.legend = F, legend=c('right'))
+#
+dev.off()
+```
+
+## ANOSIM test for all covariates
+```{r}
+anosim_test <- function(list,plsq_obj,form){
+  set.seed(2)
+  # fixed setting
+  distance <- 'wunifrac'
+  # test all genetic factors
+  design <- paste(list, collapse = " + ")
+  # build formula
+  an_data <- as.data.frame(as.matrix(sample_data(plsq_obj)))
+  # generate the model
+  test <- adonis2(formula = as.formula(paste(form, design)),data = as.data.frame(as.matrix(sample_data(plsq_obj))), distance = 'wunifrac', dfun = vegdist,na.action=na.omit)
+  test <- as.data.frame(test)
+  # sort by Pr(>F)
+  test <- test[order(test$`Pr(>F)`),]
+  print(test)
+}
+
+# 1YEAR points
+# genetic factor
+form <- 'phyloseq::distance(fungi.norm.1Y, method=distance) ~'
+g.f.anosim <- anosim_test(genetic_factors,fungi.norm.1Y,form)
+# brith factor
+b.g.anosim <- anosim_test(birth_pregnancy_factors,fungi.norm.1Y,form)
+# clinical factor
+c.f.anosim <- anosim_test(clinical_factors,fungi.norm.1Y,form)
+# environmental factor
+e.f.anosim <- anosim_test(environmental_factors,fungi.norm.1Y,form)
+```
+
+## Aim2 DA testing
+DA testing feature number counter
+```{r}
+FNC <- function(factor_list,norm.plsq){
+  set.seed(2)
+  # init df
+  holder_df <- data.frame('factor' = c(factor_list), 'counts' = rep(0,length(factor_list)))
+  #
+  for(i in factor_list){
+   aim_mas<-Maaslin2(
+        input_data = otu_table(norm.plsq), 
+        input_metadata = as.data.frame(sample_data(norm.plsq)), 
+        min_prevalence = 0.0,
+        normalization = "NONE",
+        transform = 'NONE',
+        output = "FNC", 
+        max_significance = 0.05,
+        fixed_effects = c(i),
+        standardize = FALSE,
+        plot_heatmap = TRUE)
+   # make a df
+    aim_mas <- aim_mas$results
+    aim_mas <- aim_mas %>%
+        dplyr::filter(qval < 0.05) %>%
+    rownames_to_column(var = "id")
+    # add new variable
+    aim_mas$is.neg <- ifelse(aim_mas$coef>=0,'No','Yes')
+    #
+    holder_df[(holder_df$factor == i),]$counts <- nrow(aim_mas)
+  }
+  return(holder_df)
+}
+```
+
+- Outputs the feature counts result
+```{r}
+fungi.genetic <- FNC(genetic_factors,fungi.norm.all)
+fungi.brith_n_pre <- FNC(birth_pregnancy_factors,fungi.norm.all)
+fungi.clinical <- FNC(clinical_factors,fungi.norm.1Y)
+fungi.envrionment <- FNC(environmental_factors,fungi.norm.1Y)
+```
+
+### TimeOfYear
+```{r}
+a2_1Y_mas <- Maaslin2(
+    input_data = otu_table(fungi.norm.1Y), 
+    input_metadata = as.data.frame(sample_data(fungi.norm.1Y)), 
+    min_prevalence = 0.0,
+    normalization = "NONE",
+    transform = 'NONE',
+    output = "aim2.TimeOfYear", 
+    max_significance = 0.05,
+    fixed_effects = c('TimeOfYear'),
+    standardize = FALSE,
+    plot_heatmap = TRUE)
+
+# make a df
+a2_1Y_mas <- a2_1Y_mas$results
+a2_1Y_mas <- a2_1Y_mas %>%
+    dplyr::filter(qval < 0.05) %>%
+rownames_to_column(var = "id")
+# add new variable
+a2_1Y_mas$is.neg <- ifelse(a2_1Y_mas$coef>=0,'Warm','Cold')
+
+### TimeOfYear
+png(file = paste0('/Users/senmnes/DESKTOP_HD/Bernet_6th/aim2_plot/Fungi_Aim2_DE_TimeOfYear.png'), width = 1410, height = 880, units='px')
+#
+ggplot(a2_1Y_mas, aes(x = reorder(feature,coef), y = coef, fill = is.neg)) +
+  geom_bar(stat="identity") +
+  coord_flip() +
+  geom_hline(yintercept = 0, linetype="dotted") + 
+  ylim(-0.5, 5.1) +
+  labs(x='', y='LM coefficient',
+       title = 'Fungi DA testing',
+       subtitle = paste0('Temperature of the sampling season'))+
+  scale_fill_manual(values = adjustcolor(c('gold2','lightsteelblue4')),
+                                         labels=c('Warm','Cold')) + 
+  theme_light() + theme(legend.position = c(0.91,0.1),legend.title = element_blank(),
+                  legend.background = element_rect(linetype="solid",colour ="black"),
+                  plot.subtitle = element_text(face = "bold",hjust=0.5),
+                  text = element_text(size=30),legend.key.size = unit(2, "cm"))
+#
+dev.off()
+```
+
+```{r}
+a2_1Y_mas <- Maaslin2(
+    input_data = otu_table(fungi.norm.1Y), 
+    input_metadata = as.data.frame(sample_data(fungi.norm.1Y)), 
+    min_prevalence = 0.0,
+    normalization = "NONE",
+    transform = 'NONE',
+    output = "aim2.Country", 
+    max_significance = 0.05,
+    fixed_effects = c('Country'),
+    standardize = FALSE,
+    plot_heatmap = TRUE)
+
+# make a df
+a2_1Y_mas <- a2_1Y_mas$results
+a2_1Y_mas <- a2_1Y_mas %>%
+    dplyr::filter(qval < 0.05) %>%
+rownames_to_column(var = "id")
+# add new variable
+a2_1Y_mas$is.neg <- ifelse(a2_1Y_mas$coef>=0,'Wheeze','Healthy')
+
+### Country of birth
+pdf(file = paste0('/Users/senmnes/DESKTOP_HD/Bernet_6th/aim2_plot/Fungi_Aim2_DE_country.pdf'), width = 7.4, height = 3.7, useDingbats = F, compress = F)
+#
+ggplot(a2_1Y_mas, aes(x = reorder(feature,-coef), y = coef, fill = is.neg)) +
+  geom_bar(stat="identity") +
+  coord_flip() +
+  geom_hline(yintercept = 0, linetype="dotted") + 
+  ylim(min(a2_1Y_mas$coef)*1.1, max(a2_1Y_mas$coef)*1.1) +
+  labs(x='', y='LM coefficient',
+       title = 'Fungi DA testing',
+       subtitle = paste0('Country of birth'))+
+  scale_fill_manual(values = adjustcolor(c("cadetblue4","lightsalmon3")),
+                                         labels=c('Healthy','Wheeze')) + 
+  theme_light() + theme(legend.position = c(0.88, 0.84),legend.title = element_blank(),
+                        plot.subtitle = element_text(face = "bold",hjust=0.5),
+                      legend.background = element_rect(linetype="solid",colour ="black"))
+#
+dev.off()
+```
+
+# Aim 3. 
+- Characterise the fungi community development with children’s Age(time model). 
+```{r}
+# Get the patient has all sample across the collection time
+aim3_team <- c('6045EC','6053LLD','6078MMH','4087AT','4086AMR','4117KF','6113ML','6133HC','7242MJH','7276HC','1317DR','6443LSR','4461SM','6469AB','1494OEM','7518GG','7527RM','5533LB','4565ES','7626RCH','6661LD','1664NC','5681KP','5693FN','6701JA','4710VN','4776AK','7784SLH','5788RA','5804SA','7845DTA')
+# get barcodes
+team_012MTH <- long_ss[(long_ss$SampleCollection != 'Acute'|long_ss$SampleCollection != 'Acute-NP'),]$Barcode
+aim3_plsq <- prune_samples(sample_data(fungi)$Barcode %in% team_012MTH, fungi)
+aim3_plsq <- prune_samples(sample_data(aim3_plsq)$Patient %in% aim3_team, aim3_plsq)
+
+# calculate Chao1 & Shannon index
+sample_data(aim3_plsq)$Chao1 <- estimate_richness(aim3_plsq, split = TRUE, measures = c('Chao1'))[,1]
+sample_data(aim3_plsq)$Shannon <- estimate_richness(aim3_plsq, split = TRUE, measures = c('Shannon'))[,1]
+
+# real Age, Age for each sample
+sample_data(aim3_plsq)$AgeByMonth <- 0
+for(i in seq_along(sample_data(aim3_plsq)$Patient)){
+  bd <- sample_data(aim3_plsq)$ParticipantsDateofbirth[i]
+  if(sample_data(aim3_plsq)$SampleCollection[i] == 'BCNasalswabBaseline'){
+    sd <- sample_data(aim3_plsq)$DateofVisitBaseline[i]
+    #print(bd)
+    sample_data(aim3_plsq)$AgeByMonth[i] <- day(as.period(interval(start=bd,end=sd), unit='days'))/30.437
+  }else if(sample_data(aim3_plsq)$SampleCollection[i] == 'BCNasalswab3MTH'){
+    sd <- sample_data(aim3_plsq)$DateofVisit3MTH[i]
+    sample_data(aim3_plsq)$AgeByMonth[i] <- day(as.period(interval(start=bd,end=sd), unit='days'))/30.437
+  }else if(sample_data(aim3_plsq)$SampleCollection[i] == 'BCNasalswab6MTH'){
+    sd <- sample_data(aim3_plsq)$DateofVisit6MTH[i]
+    sample_data(aim3_plsq)$AgeByMonth[i] <- day(as.period(interval(start=bd,end=sd), unit='days'))/30.437
+  }else if(sample_data(aim3_plsq)$SampleCollection[i] == 'BCNasalswab1YEAR'){
+    sd <- sample_data(aim3_plsq)$DateofVisit1YEAR[i]
+    sample_data(aim3_plsq)$AgeByMonth[i] <- day(as.period(interval(start=bd,end=sd), unit='days'))/30.437
+  }
+}
+#
+sample_data(aim3_plsq)$AgeGroup <- NA
+# set attribute for Age groups
+for(k in seq_along(sample_data(aim3_plsq)$AgeByMonth)){
+  if((sample_data(aim3_plsq)$SampleCollection[k]=='BCNasalswabBaseline'))
+    {sample_data(aim3_plsq)$AgeGroup[k] <- 'T1-1week'}
+  else if((sample_data(aim3_plsq)$SampleCollection[k]=='BCNasalswab3MTH'))
+    {sample_data(aim3_plsq)$AgeGroup[k] <- 'T2-3months'}
+  else if((sample_data(aim3_plsq)$SampleCollection[k]=='BCNasalswab6MTH'))
+    {sample_data(aim3_plsq)$AgeGroup[k] <- 'T3-6months'}
+  else if((sample_data(aim3_plsq)$SampleCollection[k]=='BCNasalswab1YEAR'))
+    {sample_data(aim3_plsq)$AgeGroup[k] <- 'T4-1year'}
+}
+
+# convert into factor value
+sample_data(aim3_plsq)$AgeGroup <- factor(sample_data(aim3_plsq)$AgeGroup, levels=c('T1-1week','T2-3months','T3-6months','T4-1year'))
+```
+
+## Alpha diversity analysis
+```{r}
+#### Diversity
+png(file = paste0(aim3_path,'/Aim3_FD_AgeGroup.png'), width = 1410, height = 1210, units='px')
+#
+ggplot(sample_data(aim3_plsq),aes(x=Group, y=Shannon)) + 
+        geom_boxplot(aes(y = Shannon)) +
+        geom_jitter(aes(y = Shannon,fill = Group,alpha=0.95),shape = 21,
+                    width = 0.15,size=7) +
+        stat_compare_means(comparisons = list(unique(sample_data(aim3_plsq)$Group)),
+                           paired = FALSE,vjust = -0.5)+ facet_wrap(vars(AgeGroup))+
+        labs(x='', y='Shannon index',
+             title = 'Fungal diversity',
+             subtitle = paste0('Longitudinal group')) +
+        scale_fill_manual(values = adjustcolor(custom_palette)) +
+        scale_color_manual(values = adjustcolor(custom_palette)) +
+        ylim(0,max(sample_data(aim3_plsq)$Shannon * 1.3))  +  theme_light() +
+        theme(legend.position = 'right',
+        legend.background = element_rect(linetype="solid",colour ="black")) +
+        guides(alpha="none")
+#
+dev.off()
+
+#### Richness
+pdf(file = paste0(aim3_path,'/Aim3_FR_AgeGroup.pdf'), width = 5, height = 5, useDingbats = F, compress = F)
+#
+ggplot(sample_data(aim3_plsq),aes(x=Group, y=Chao1)) + 
+        geom_boxplot(aes(y = Chao1)) +
+        geom_jitter(aes(y = Chao1,fill = Group,alpha=0.95),shape = 21,width = 0.15) +
+        stat_compare_means(comparisons = list(unique(sample_data(aim3_plsq)$Group)),
+                           paired = FALSE,vjust = -0.5)+ facet_wrap(vars(AgeGroup))+
+        labs(x='', y='Chao1 index',
+             title = 'Fungal richness',
+             subtitle = paste0('Longitudinal group')) +
+                scale_fill_manual(values = adjustcolor(custom_palette)) +
+        scale_color_manual(values = adjustcolor(custom_palette)) +
+        ylim(0,max(sample_data(aim3_plsq)$Chao1 * 1.3))  +  
+        theme_bw() +
+        theme(legend.position = 'none',legend.title = element_blank(),
+                  legend.background = element_rect(linetype="solid",colour ="black"),
+                  text = element_text(size=45),legend.key.size = unit(2, "cm"))
+#
+dev.off()
+```
+
+## Beta diversity analysis
+The new phyloseq is directly assign from `fungi`, which has not been normalized.
+```{r}
+otu_table(aim3_plsq) <-otu_table(MRcounts(cumNorm(phyloseq_to_metagenomeSeq(aim3_plsq),p=cumNormStatFast(phyloseq_to_metagenomeSeq(aim3_plsq))),norm=TRUE, log=TRUE), taxa_are_rows=TRUE)
+```
+
+```{r}
+aim3_palette <- c('seagreen3','orange3','purple3','lightsteelblue4')
+aim3_path <- '/Users/senmnes/DESKTOP_HD/Bernet_6th/aim3_plot'
+# get df
+aim3_fungi_ord_Wunifrac <- ordinate(aim3_plsq,'PCoA',"unifrac", weighted=TRUE)
+#
+aim3_pcoA_DF <- plot_ordination(aim3_plsq, aim3_fungi_ord_Wunifrac, color='AgeGroup',justDF = T)
+# plotting
+png(file = paste0(aim3_path,'/Aim1_Fungi_Beta_Diversity.png'),width=1410, height=1410, units='px')
+#
+ggplot(aim3_pcoA_DF,aes(Axis.1, Axis.2)) + 
+  geom_point(aes(fill=AgeGroup,shape = Group), width = 0.15,size=7) +
+  stat_ellipse(aes(fill = AgeGroup),geom = "polygon", linetype=0, alpha=0.15)+
+  labs(color='TimeFactors', fill ='TimeFactors',
+                 title = paste0('Fungi weighted Unifrac PCoA'),
+                 subtitle = 'Longitudinal group') +
+              xlab(paste0('PCoA1 ',round(aim3_fungi_ord_Wunifrac$values$Relative_eig*100)[1],'%'))+
+              ylab(paste0('PCoA2 ',round(aim3_fungi_ord_Wunifrac$values$Relative_eig*100)[2],'%'))+
+              scale_fill_manual(values = adjustcolor(aim3_palette)) +
+              scale_color_manual(values = adjustcolor(aim3_palette)) +
+              scale_shape_manual(values=c(21,23)) + 
+              geom_xsidedensity(aes(fill=AgeGroup),alpha=0.45) + 
+              geom_ysidedensity(aes(fill=AgeGroup),alpha=0.45) +
+              guides(size='none') + theme_light() +
+              theme(axis.text.x=element_blank(),
+                  axis.ticks.x=element_blank(),
+                  axis.text.y=element_blank(),
+                  axis.ticks.y=element_blank())+
+              theme(legend.position = 'right',legend.title = element_blank(),
+                     legend.background = element_rect(linetype="solid",colour ="black"),
+                  text = element_text(size=45),legend.key.size = unit(2, "cm"))+
+        guides(alpha="none")
+# 
+dev.off()
+```
+
+## Aim3 DA testing
+### AgeGroup
+```{r}
+# a3_1Y_mas <- Maaslin2(
+#     input_data = otu_table(aim3_plsq), 
+#     input_metadata = as.data.frame(sample_data(aim3_plsq)), 
+#     min_prevalence = 0.0,
+#     normalization = "NONE",
+#     transform = 'NONE',
+#     output = "aim3.AgeGroup", 
+#     max_significance = 0.05,
+#     fixed_effects = c('AgeGroup'),
+#     standardize = FALSE)
+# 
+# # make a df
+# a3_1Y_mas <- a3_1Y_mas$results
+# a3_1Y_mas <- a3_1Y_mas %>%
+#     dplyr::filter(qval < 0.05) %>%
+# rownames_to_column(var = "id")
+# # add new variable
+# a3_1Y_mas$is.neg <- ifelse(a3_1Y_mas$coef>=0,'Wheeze','Healthy')
+# 
+# # AgeGroup
+# pdf(file = paste0(aim3_path,'/Fungi_Aim3_DA_AgeGroup.pdf'), width = 10, height = 10, useDingbats = F, compress = F)
+# #
+# ggplot(a3_1Y_mas, aes(x = reorder(feature,-coef), y = coef, fill = is.neg)) +
+#   geom_bar(stat="identity") +
+#   coord_flip() +
+#   geom_hline(yintercept = 0, linetype="dotted") + 
+#   ylim(min(a3_1Y_mas$coef)*1.1, max(a3_1Y_mas$coef)*1.1) +
+#   labs(x='Taxonomy', y='LM coefficient',
+#          title = ('Fungi DA testing'),
+#          subtitle = paste0('AgeGroup'))+
+#   scale_fill_manual(values =c('pink4','pink2'))+ 
+#   theme_light() + theme(legend.position="none")
+# #
+# dev.off()
+```
+
+# Output Phyloseq Object to local
+```{r}
+#saveRDS(fungi.1Y, '/Users/senmnes/DESKTOP_HD/Bernet_6th/fungi.1Y.rds')
+#saveRDS(fungi, '/Users/senmnes/DESKTOP_HD/Bernet_6th/fungi.rds')
+#saveRDS(aim3_plsq, '/Users/senmnes/DESKTOP_HD/Bernet_6th/aim3.fungi.rds')
+```

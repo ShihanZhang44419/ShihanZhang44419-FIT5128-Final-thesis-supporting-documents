@@ -1,0 +1,35 @@
+,,,,,,,,,,
+,,,,,,,,,,
+,,Bacteria,,,,,Fungi,,,
+,,PERMANOVA,,D.A. test (Masslin2),Wilcoxon test/Pearson correlation coefficient(Shannon index),,PERMANOVA,,D.A. test (Masslin2),Wilcoxon test/Pearson correlation coefficient(Shannon index)
+,Genetic and family history,R2,Pr(>F),nFeatures,P-value,,R2,Pr(>F),nFeatures,P-value
+,Gender,0.004,0.3580,0,0.3246,,0.005,0.6210,0,0.6072
+,Mother‘s asthma history,0.001,0.9570,0,0.8515,,0.008,0.1430,3,0.8722
+,Mother’s eczema history,0.009,0.1150,0,0.9503,,0.004,0.7810,0,0.4164
+,Mother’s hayfever history,0.000,0.9980,0,0.3263,,0.012,0.0160,0,0.6137
+,Father‘s asthma history,0.002,0.8310,2,0.0608,,0.007,0.2610,0,0.7185
+,Father‘s eczema history,0.003,0.5810,0,0.8923,,0.008,0.2420,0,0.8934
+,Father‘s hayfever history,0.002,0.8930,0,0.7993,,0.005,0.1530,0,0.1145
+,Pregnancy and birth,,,,,,,,,
+,Number of antibiotics taken during pregnancy,0.029,0.2130,4,0.1035,,0.020,0.8060,1,0.8951
+,Breastfeeding after birth,0.002,0.8840,2,0.0229,,0.003,0.9410,1,0.1502
+,Delivery method,0.003,0.7040,0,0.1726,,0.008,0.1960,0,0.5059
+,Gestation age,0.019,0.6520,0,0.8566,,0.027,0.7360,0,0.1250
+,Body weight after birth,0.639,0.8230,0,0.9573,,0.734,0.7990,0,0.7770
+,Clinical data and symptoms,,,,,,,,,
+,Number of chest infections before 1YEAR,0.035,0.2990,0,0.0046,,0.043,0.1270,2,0.7889
+,Number of colds before 1YEAR,0.053,0.6120,0,0.0143,,0.072,0.4560,0,0.2042
+,Number of diagnosed bronchiolitis before 1YEAR,0.043,0.7180,1,0.3796,,0.074,0.1810,0,0.2504
+,Doctor visits for asthma or wheezeing before 1YEAR,0.003,0.5720,0,0.0931,,0.010,0.0540,0,0.9331
+,Had dry cough at night before 1YEAR,0.002,0.8790,0,0.6610,,0.005,0.6560,1,0.2457
+,Had food adverse reactions before 1YEAR,0.006,0.2290,0,0.6212,,0.002,0.9910,1,0.4626
+,Hospital visits for asthma or wheezing before 1YEAR,0.011,0.0680,1,0.0257,,0.006,0.4070,1,0.6599
+,Had rash symptoms before 1YEAR,0.002,0.8630,0,0.2040,,0.008,0.1750,0,0.7239
+,Had sneezing symptoms before 1YEAR,0.003,0.5150,2,0.2455,,0.006,0.4800,9,0.4297
+,Environment and treatments,,,,,,,,,
+,Number of antibiotics used before 1YEAR,0.025,0.2150,0,0.0291,,0.033,0.2020,0,0.0433
+,Country of birth,0.003,0.5400,0,0.5337,,0.015,0.0010,1,0.4750
+,Attending daycare before 1YEAR,0.040,0.0010,6,0.8826,,0.006,0.3960,0,0.9374
+,Number of people living in the house,0.054,0.0090,0,0.9004,,0.045,0.2060,0,0.9115
+,Parents smoking,0.007,0.1220,0,0.0604,,0.006,0.3740,0,0.5984
+,Season temperature,0.011,0.0430,0,0.7370,,0.026,0.0010,6,0.0004
